@@ -37,7 +37,7 @@ struct Cli {
     #[arg(long)]
     review_only: bool,
     /// Retains this many system generations after deployment.
-    #[arg(long, default_value = "3")]
+    #[arg(long, default_value = "2")]
     keep_generations: NonZeroU32,
     /// Skips post-deployment garbage collection.
     #[arg(long, conflicts_with = "keep_generations")]

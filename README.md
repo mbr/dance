@@ -37,7 +37,7 @@ compares the active system on `www.example.com` with the system defined locally.
 nixos-rebuild switch --flake ../production#web-server --target-host root@www.example.com
 ```
 
-After a deployment, Dance keeps the latest three system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup.
+After a deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup.
 
 Other ways to run Dance:
 
