@@ -15,7 +15,7 @@ const REVIEW_TEMPLATE: &str =
 /// Defines the layout of a flake update bar.
 const UPDATE_TEMPLATE: &str = "{spinner} updating {prefix} [{pos}/{len}] {msg:.dim}";
 /// Defines the layout of a host status line.
-const HOST_TEMPLATE: &str = "{spinner} {prefix} {msg}";
+const HOST_TEMPLATE: &str = "{spinner} {prefix} {wide_msg}";
 /// Defines the smooth spinner animation and its blank final frame.
 const SPINNER_TICKS: &str =
     "\u{280b}\u{2819}\u{2839}\u{2838}\u{283c}\u{2834}\u{2826}\u{2827}\u{2807}\u{280f} ";
