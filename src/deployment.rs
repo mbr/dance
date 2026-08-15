@@ -11,23 +11,57 @@ use crate::{
     error::Error,
     inventory::Inventory,
     status::{self, ProgressDisplay},
+    update::{self, UpdateOutcome},
 };
 
 /// Runs the concurrent deployment workflow.
-pub(crate) async fn deploy(inventory: Inventory) -> Result<(), Error> {
+pub(crate) async fn deploy(inventory: Inventory, update_flakes: bool) -> Result<(), Error> {
+    let flakes = inventory.flake_groups();
     let hosts = inventory.into_iter().collect::<Vec<_>>();
     let mut rows = hosts.iter().map(HostRow::collecting).collect::<Vec<_>>();
-    let review_progress = status::review(hosts.len())?;
-    let outcomes = join_all(
+    let review_progress = status::review(hosts.len(), update_flakes)?;
+
+    let deployed = join_all(
         hosts
-            .into_iter()
-            .map(|host| host::review(host, &review_progress)),
-    )
-    .await;
+            .iter()
+            .map(|host| host::deployed(host, &review_progress)),
+    );
+    let local = async {
+        let updates = if update_flakes {
+            update::flakes(flakes, &review_progress).await
+        } else {
+            UpdateOutcome::default()
+        };
+        let expected = join_all(hosts.iter().map(|host| async {
+            if updates.failed(host.flake_path()) {
+                host::skip_expected(host, &review_progress);
+                None
+            } else {
+                Some(host::expected(host, &review_progress).await)
+            }
+        }))
+        .await;
+        (updates, expected)
+    };
+    let (deployed, (mut updates, expected)) = tokio::join!(deployed, local);
 
     let mut reviewed = Vec::new();
-    let mut first_error = None;
-    for (row, outcome) in rows.iter_mut().zip(outcomes) {
+    let mut first_error = updates.take_error();
+    for (((row, host), deployed), expected) in
+        rows.iter_mut().zip(hosts).zip(deployed).zip(expected)
+    {
+        let outcome = match deployed {
+            Err(error) => Err(error),
+            Ok(deployed) => match expected {
+                Some(Ok(expected)) => Ok(host::review(host, deployed, expected)),
+                Some(Err(error)) => Err(error),
+                None => {
+                    row.fail();
+                    continue;
+                }
+            },
+        };
+
         match outcome {
             Ok(ReviewOutcome::UpToDate(host_row)) => *row = host_row,
             Ok(ReviewOutcome::OutOfDate(host_row, host)) => {

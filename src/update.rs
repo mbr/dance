@@ -1,33 +1,76 @@
-//! Flake input updates before deployment review.
+//! Flake input updates during deployment review.
 
-use crate::{error::Error, inventory::Inventory, process::run, status};
+use std::{
+    collections::HashSet,
+    path::{Path, PathBuf},
+};
 
-/// Updates every distinct flake referenced by the selected hosts.
-pub(crate) async fn flakes(inventory: &Inventory) -> Result<(), Error> {
-    let flakes = inventory.flake_paths();
-    let progress = status::update(flakes.len())?;
+use futures::future::join_all;
+use indicatif::ProgressBar;
 
-    for flake in flakes {
-        progress.set_prefix(flake.display().to_string());
-        progress.set_message("");
-        if let Err(error) = run(
-            "nix",
-            &[
-                "flake".into(),
-                "update".into(),
-                "--flake".into(),
-                flake.as_os_str().to_owned(),
-            ],
-            &progress,
-        )
-        .await
-        {
-            progress.abandon();
-            return Err(error);
-        }
-        progress.inc(1);
+use crate::{error::Error, process::run};
+
+/// Contains the failures from a group of flake updates.
+#[derive(Default)]
+pub(crate) struct UpdateOutcome {
+    /// Identifies flakes whose inputs could not be updated.
+    failed: HashSet<PathBuf>,
+    /// Retains the first update error for reporting.
+    first_error: Option<Error>,
+}
+
+impl UpdateOutcome {
+    /// Returns whether a flake update failed.
+    pub(crate) fn failed(&self, flake: &Path) -> bool {
+        self.failed.contains(flake)
     }
 
-    progress.finish_and_clear();
-    Ok(())
+    /// Takes the first update error.
+    pub(crate) fn take_error(&mut self) -> Option<Error> {
+        self.first_error.take()
+    }
+}
+
+/// Updates one flake and advances every host that depends on it.
+async fn flake(
+    path: PathBuf,
+    host_count: usize,
+    progress: &ProgressBar,
+) -> (PathBuf, Result<(), Error>) {
+    let result = run(
+        "nix",
+        &[
+            "flake".into(),
+            "update".into(),
+            "--flake".into(),
+            path.as_os_str().to_owned(),
+        ],
+        progress,
+    )
+    .await
+    .map(|_output| ());
+    let status = if result.is_ok() { "updated" } else { "failed" };
+    progress.set_message(format!("{}: inputs {status}", path.display()));
+    progress.inc(u64::try_from(host_count).expect("host count should fit in u64"));
+    (path, result)
+}
+
+/// Updates distinct flakes concurrently and collects their failures.
+pub(crate) async fn flakes(flakes: Vec<(PathBuf, usize)>, progress: &ProgressBar) -> UpdateOutcome {
+    let results = join_all(
+        flakes
+            .into_iter()
+            .map(|(path, host_count)| flake(path, host_count, progress)),
+    )
+    .await;
+    let mut outcome = UpdateOutcome::default();
+
+    for (path, result) in results {
+        if let Err(error) = result {
+            outcome.failed.insert(path);
+            outcome.first_error.get_or_insert(error);
+        }
+    }
+
+    outcome
 }

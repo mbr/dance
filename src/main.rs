@@ -22,7 +22,7 @@ struct Cli {
     /// Selects the host inventory.
     #[arg(long, env = "DANCE_INVENTORY", default_value = "inventory.toml")]
     inventory: PathBuf,
-    /// Updates selected flakes before reviewing hosts.
+    /// Updates selected flakes during review.
     #[arg(long)]
     update: bool,
     /// Limits deployment to these inventory IDs.
@@ -34,10 +34,7 @@ struct Cli {
 async fn run() -> Result<(), Error> {
     let cli = Cli::parse();
     let inventory = Inventory::load(&cli.inventory)?.select(&cli.ids)?;
-    if cli.update {
-        update::flakes(&inventory).await?;
-    }
-    deployment::deploy(inventory).await
+    deployment::deploy(inventory, cli.update).await
 }
 
 /// Reports whether the deployment workflow succeeded.

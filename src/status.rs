@@ -12,8 +12,6 @@ const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 /// Defines the layout of the information collection bar.
 const REVIEW_TEMPLATE: &str =
     "{spinner} collecting info [{bar:20.cyan/blue}] {pos}/{len} {msg:.dim}";
-/// Defines the layout of a flake update bar.
-const UPDATE_TEMPLATE: &str = "{spinner} updating {prefix} [{pos}/{len}] {msg:.dim}";
 /// Defines the layout of a host status line.
 const HOST_TEMPLATE: &str = "{spinner} {prefix} {wide_msg}";
 /// Defines the smooth spinner animation and its blank final frame.
@@ -63,22 +61,14 @@ fn spinner_style(template: &str) -> Result<ProgressStyle, Error> {
         .tick_chars(SPINNER_TICKS))
 }
 
-/// Creates a progress bar for local and remote host information collection.
-pub(crate) fn review(host_count: usize) -> Result<ProgressBar, Error> {
+/// Creates a progress bar for host review steps.
+pub(crate) fn review(host_count: usize, update: bool) -> Result<ProgressBar, Error> {
     let host_count = u64::try_from(host_count).expect("host count should fit in u64");
+    let steps_per_host = if update { 3 } else { 2 };
     let length = host_count
-        .checked_mul(2)
-        .expect("information collection step count should fit in u64");
+        .checked_mul(steps_per_host)
+        .expect("review step count should fit in u64");
     let style = spinner_style(REVIEW_TEMPLATE)?.progress_chars("=>-");
-    let progress = ProgressBar::new(length).with_style(style);
-    progress.enable_steady_tick(SPINNER_INTERVAL);
-    Ok(progress)
-}
-
-/// Creates a progress bar for updating selected flakes.
-pub(crate) fn update(flake_count: usize) -> Result<ProgressBar, Error> {
-    let length = u64::try_from(flake_count).expect("flake count should fit in u64");
-    let style = spinner_style(UPDATE_TEMPLATE)?;
     let progress = ProgressBar::new(length).with_style(style);
     progress.enable_steady_tick(SPINNER_INTERVAL);
     Ok(progress)
@@ -145,5 +135,20 @@ impl ProgressDisplay {
                 progress
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::review;
+
+    /// Checks that updates add one review step per host.
+    #[test]
+    fn updates_extend_host_review_progress() {
+        let normal = review(2, false).expect("review progress should be created");
+        let updating = review(2, true).expect("update progress should be created");
+
+        assert_eq!(normal.length(), Some(4));
+        assert_eq!(updating.length(), Some(6));
     }
 }

@@ -53,16 +53,14 @@ impl Inventory {
         Ok(inventory)
     }
 
-    /// Returns each selected flake path once in inventory order.
-    pub(crate) fn flake_paths(&self) -> Vec<&Path> {
-        let mut seen = HashSet::new();
-        self.hosts
-            .values()
-            .filter_map(|host| {
-                let path = host.flake_path.as_path();
-                seen.insert(path).then_some(path)
-            })
-            .collect()
+    /// Returns selected flake paths and host counts in inventory order.
+    pub(crate) fn flake_groups(&self) -> Vec<(PathBuf, usize)> {
+        let mut flakes = IndexMap::new();
+        for host in self.hosts.values() {
+            let count = flakes.entry(host.flake_path.clone()).or_insert(0);
+            *count += 1;
+        }
+        flakes.into_iter().collect()
     }
 
     /// Limits the inventory to explicitly requested hosts.
@@ -106,6 +104,11 @@ impl Host {
     /// Returns the inventory ID.
     pub(crate) fn id(&self) -> &str {
         &self.id
+    }
+
+    /// Returns the flake directory.
+    pub(crate) fn flake_path(&self) -> &Path {
+        &self.flake_path
     }
 
     /// Returns the display form of the flake selector.
@@ -237,7 +240,7 @@ impl Host {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::path::PathBuf;
 
     use indexmap::IndexMap;
 
@@ -300,8 +303,11 @@ flake_name = "www"
             .expect("second host should exist")
             .1
             .flake_path = PathBuf::from("www");
-        let flakes = shared.flake_paths();
-        assert_eq!(flakes, [Path::new("www"), Path::new("other")]);
+        let flakes = shared.flake_groups();
+        assert_eq!(
+            flakes,
+            [(PathBuf::from("www"), 2), (PathBuf::from("other"), 1)]
+        );
 
         let unknown = inventory(&["www"]).select(&["party".to_owned()]);
         assert!(matches!(

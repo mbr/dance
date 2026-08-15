@@ -6,7 +6,7 @@ At its core, Dance takes servers defined in local Nix flakes and deploys them ov
 
 - An inventory keeps short server IDs and SSH addresses in one place.
 - Review and deployment run in parallel across multiple servers.
-- `--update` updates the inputs of all selected flakes before deployment.
+- `--update` updates the inputs of all selected flakes during review.
 - Systems are built locally and transferred with Nix.
 - No separate deployment state is kept: Dance checks `/run/current-system` to determine whether an update is needed.
 
@@ -42,5 +42,5 @@ Other ways to run Dance:
 ```console
 dance                     # Review every server
 dance www                 # Review only the www inventory entry
-dance --update www        # Update the production flake before review
+dance --update www        # Update the production flake during review
 ```

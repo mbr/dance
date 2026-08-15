@@ -139,38 +139,50 @@ async fn collect_step<T, E>(
     result
 }
 
-/// Collects the deployed and desired state of one host.
-pub(super) async fn review(host: Host, progress: &ProgressBar) -> Result<ReviewOutcome, Error> {
-    let (deployed, expected) = tokio::join!(
-        collect_step(
-            progress,
-            host.id(),
-            "remote",
-            host.deployed_store_path(progress),
-        ),
-        collect_step(
-            progress,
-            host.id(),
-            "local",
-            host.expected_store_path(progress),
-        ),
-    );
-    let deployed = deployed?;
-    let expected = expected?;
+/// Collects the system currently active on one host.
+pub(super) async fn deployed(host: &Host, progress: &ProgressBar) -> Result<StorePath, Error> {
+    collect_step(
+        progress,
+        host.id(),
+        "remote",
+        host.deployed_store_path(progress),
+    )
+    .await
+}
+
+/// Collects the system expected from one host's local configuration.
+pub(super) async fn expected(host: &Host, progress: &ProgressBar) -> Result<StorePath, Error> {
+    collect_step(
+        progress,
+        host.id(),
+        "local",
+        host.expected_store_path(progress),
+    )
+    .await
+}
+
+/// Completes the local collection step after a flake update failure.
+pub(super) fn skip_expected(host: &Host, progress: &ProgressBar) {
+    progress.set_message(format!("{}: local info skipped", host.id()));
+    progress.inc(1);
+}
+
+/// Compares the deployed and expected systems for one host.
+pub(super) fn review(host: Host, deployed: StorePath, expected: StorePath) -> ReviewOutcome {
     let row = HostRow::collected(&host, &deployed, &expected);
 
     if deployed == expected {
-        return Ok(ReviewOutcome::UpToDate(row));
+        return ReviewOutcome::UpToDate(row);
     }
 
-    Ok(ReviewOutcome::OutOfDate(
+    ReviewOutcome::OutOfDate(
         row,
         Box::new(ReviewedHost {
             host,
             deployed,
             expected,
         }),
-    ))
+    )
 }
 
 /// Builds, prepares, and activates one outdated host.
