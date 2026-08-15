@@ -3,6 +3,7 @@
 use std::{
     fmt::{self, Display, Formatter},
     future::Future,
+    num::NonZeroU32,
 };
 
 use indicatif::ProgressBar;
@@ -105,6 +106,16 @@ pub(super) enum ReviewOutcome {
     OutOfDate(HostRow, Box<ReviewedHost>),
 }
 
+/// Describes the result of activation and post-deployment cleanup.
+pub(super) enum ActivationOutcome {
+    /// The host was activated and cleaned successfully.
+    Activated,
+    /// The host could not be activated.
+    ActivationFailed(Error),
+    /// The host was activated but could not be cleaned.
+    CleanupFailed(Error),
+}
+
 /// Contains the state collected for one outdated host.
 pub(super) struct ReviewedHost {
     /// Provides host operations and connection details.
@@ -194,12 +205,12 @@ pub(super) fn review(host: Host, deployed: StorePath, expected: StorePath) -> Re
     )
 }
 
-/// Builds, prepares, and activates one outdated host.
-pub(super) async fn activate(
+/// Builds, prepares, activates, and verifies one outdated host.
+async fn switch_system(
     reviewed: ReviewedHost,
     logs: &RunLog,
     progress: &ProgressBar,
-) -> Result<(), Error> {
+) -> Result<Host, Error> {
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Building);
     reviewed.host.build(logs, progress).await?;
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Preparing);
@@ -240,6 +251,28 @@ pub(super) async fn activate(
         });
     }
 
-    status::finish(progress, reviewed.host.id());
-    Ok(())
+    Ok(reviewed.host)
+}
+
+/// Activates one host and performs configured post-deployment cleanup.
+pub(super) async fn activate(
+    reviewed: ReviewedHost,
+    keep_generations: Option<NonZeroU32>,
+    logs: &RunLog,
+    progress: &ProgressBar,
+) -> ActivationOutcome {
+    let host = match switch_system(reviewed, logs, progress).await {
+        Ok(host) => host,
+        Err(error) => return ActivationOutcome::ActivationFailed(error),
+    };
+
+    if let Some(keep_generations) = keep_generations {
+        status::set_phase(progress, host.id(), DeploymentPhase::CollectingGarbage);
+        if let Err(error) = host.collect_garbage(keep_generations, logs, progress).await {
+            return ActivationOutcome::CleanupFailed(error);
+        }
+    }
+
+    status::finish(progress, host.id());
+    ActivationOutcome::Activated
 }

@@ -2,13 +2,16 @@
 
 mod host;
 
-use std::io::{self, IsTerminal};
+use std::{
+    io::{self, IsTerminal},
+    num::NonZeroU32,
+};
 
 use dialoguer::{Confirm, console::style, theme::ColorfulTheme};
 use futures::future::join_all;
 use tabled::Table;
 
-use self::host::{HostRow, ReviewOutcome, ReviewedHost};
+use self::host::{ActivationOutcome, HostRow, ReviewOutcome, ReviewedHost};
 use crate::{
     error::Error,
     inventory::Inventory,
@@ -18,6 +21,7 @@ use crate::{
 };
 
 /// Selects how Dance proceeds after reviewing outdated hosts.
+#[derive(Clone, Copy)]
 pub(crate) enum Mode {
     /// Requests interactive approval.
     Confirm,
@@ -27,17 +31,27 @@ pub(crate) enum Mode {
     ReviewOnly,
 }
 
+/// Configures one deployment workflow.
+#[derive(Clone, Copy)]
+pub(crate) struct Options {
+    /// Selects whether flake inputs are updated during review.
+    pub(crate) update_flakes: bool,
+    /// Selects how outdated hosts proceed after review.
+    pub(crate) mode: Mode,
+    /// Selects post-deployment cleanup and generation retention.
+    pub(crate) keep_generations: Option<NonZeroU32>,
+}
+
 /// Runs the concurrent deployment workflow.
 pub(crate) async fn deploy(
     inventory: Inventory,
-    update_flakes: bool,
-    mode: Mode,
+    options: Options,
     logs: &RunLog,
 ) -> Result<(), Error> {
     let flakes = inventory.flake_groups();
     let hosts = inventory.into_iter().collect::<Vec<_>>();
     let mut rows = hosts.iter().map(HostRow::collecting).collect::<Vec<_>>();
-    let review_progress = status::review(hosts.len(), update_flakes)?;
+    let review_progress = status::review(hosts.len(), options.update_flakes)?;
 
     let deployed = join_all(
         hosts
@@ -45,7 +59,7 @@ pub(crate) async fn deploy(
             .map(|host| host::deployed(host, logs, &review_progress)),
     );
     let local = async {
-        let updates = if update_flakes {
+        let updates = if options.update_flakes {
             update::flakes(flakes, logs, &review_progress).await
         } else {
             UpdateOutcome::default()
@@ -114,15 +128,17 @@ pub(crate) async fn deploy(
     if reviewed.is_empty() {
         return first_error.map_or(Ok(()), Err);
     }
-    if matches!(mode, Mode::ReviewOnly) {
+    if matches!(options.mode, Mode::ReviewOnly) {
         println!("deployment: skipped");
         return first_error.map_or(Ok(()), Err);
     }
-    if matches!(mode, Mode::Confirm) && !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+    if matches!(options.mode, Mode::Confirm)
+        && !(io::stdin().is_terminal() && io::stderr().is_terminal())
+    {
         return Err(Error::ConfirmationRequired);
     }
 
-    if matches!(mode, Mode::Confirm) {
+    if matches!(options.mode, Mode::Confirm) {
         let theme = ColorfulTheme {
             success_prefix: style(">".to_owned()).for_stderr().green(),
             ..ColorfulTheme::default()
@@ -137,29 +153,54 @@ pub(crate) async fn deploy(
         }
     }
 
-    let activation = activate(reviewed, logs).await;
+    let activation = activate(reviewed, options.keep_generations, logs).await;
     first_error.map_or(activation, Err)
 }
 
 /// Builds, prepares, and activates all reviewed hosts concurrently.
-async fn activate(reviewed: Vec<ReviewedHost>, logs: &RunLog) -> Result<(), Error> {
+async fn activate(
+    reviewed: Vec<ReviewedHost>,
+    keep_generations: Option<NonZeroU32>,
+    logs: &RunLog,
+) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
-    let results = join_all(reviewed.into_iter().zip(progresses.iter()).map(
+    let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
-            let result = host::activate(host, logs, progress).await;
-            if result.is_err() {
+            let outcome = host::activate(host, keep_generations, logs, progress).await;
+            if !matches!(&outcome, ActivationOutcome::Activated) {
                 status::fail(progress);
             }
-            result
+            outcome
         },
     ))
     .await;
-    let failed = results.iter().filter(|result| result.is_err()).count();
-    println!(
-        "deployment: {} activated, {failed} failed",
-        results.len() - failed
-    );
 
-    results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
+    let mut activated = 0;
+    let mut failed = 0;
+    let mut cleanup_failed = 0;
+    let mut first_error = None;
+    for outcome in outcomes {
+        match outcome {
+            ActivationOutcome::Activated => activated += 1,
+            ActivationOutcome::ActivationFailed(error) => {
+                failed += 1;
+                first_error.get_or_insert(error);
+            }
+            ActivationOutcome::CleanupFailed(error) => {
+                activated += 1;
+                cleanup_failed += 1;
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if cleanup_failed == 0 {
+        println!("deployment: {activated} activated, {failed} failed");
+    } else {
+        println!(
+            "deployment: {activated} activated, {failed} failed, {cleanup_failed} cleanup failed"
+        );
+    }
+
+    first_error.map_or(Ok(()), Err)
 }

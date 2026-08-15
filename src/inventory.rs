@@ -3,6 +3,7 @@
 use std::{
     collections::HashSet,
     fs,
+    num::NonZeroU32,
     path::{Path, PathBuf},
 };
 
@@ -239,6 +240,60 @@ impl Host {
                 store_path.as_ref().as_os_str().to_owned(),
                 "--target-host".into(),
                 self.ssh_url().into(),
+            ],
+            progress,
+        )
+        .await
+    }
+
+    /// Prunes old generations and collects the target's unreachable store paths.
+    pub(crate) async fn collect_garbage(
+        &self,
+        keep_generations: NonZeroU32,
+        logs: &RunLog,
+        progress: &ProgressBar,
+    ) -> Result<(), Error> {
+        let label = format!("deploy-{}-prune-generations", self.id);
+        run_status(
+            logs,
+            &label,
+            "ssh",
+            &[
+                self.ssh_url().into(),
+                "nix-env".into(),
+                "--profile".into(),
+                "/nix/var/nix/profiles/system".into(),
+                "--delete-generations".into(),
+                format!("+{keep_generations}").into(),
+            ],
+            progress,
+        )
+        .await?;
+
+        let label = format!("deploy-{}-refresh-bootloader", self.id);
+        run_status(
+            logs,
+            &label,
+            "ssh",
+            &[
+                self.ssh_url().into(),
+                "/run/current-system/bin/switch-to-configuration".into(),
+                "boot".into(),
+            ],
+            progress,
+        )
+        .await?;
+
+        let label = format!("deploy-{}-collect-garbage", self.id);
+        run_status(
+            logs,
+            &label,
+            "ssh",
+            &[
+                self.ssh_url().into(),
+                "nix".into(),
+                "store".into(),
+                "gc".into(),
             ],
             progress,
         )

@@ -9,7 +9,7 @@ mod status;
 mod store_path;
 mod update;
 
-use std::{path::PathBuf, process::ExitCode};
+use std::{num::NonZeroU32, path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use display_full_error::DisplayFullErrorExt;
@@ -36,6 +36,12 @@ struct Cli {
     /// Stops after updating and collecting host information.
     #[arg(long)]
     review_only: bool,
+    /// Retains this many system generations after deployment.
+    #[arg(long, default_value = "3")]
+    keep_generations: NonZeroU32,
+    /// Skips post-deployment garbage collection.
+    #[arg(long, conflicts_with = "keep_generations")]
+    no_gc: bool,
     /// Selects when command logs are retained.
     #[arg(long, env = "DANCE_LOGS", value_enum, default_value = "on-error")]
     logs: LogMode,
@@ -56,8 +62,13 @@ async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
     } else {
         deployment::Mode::Confirm
     };
+    let options = deployment::Options {
+        update_flakes: cli.update,
+        mode,
+        keep_generations: (!cli.no_gc).then_some(cli.keep_generations),
+    };
     let inventory = Inventory::load(&cli.inventory)?.select(&cli.ids)?;
-    deployment::deploy(inventory, cli.update, mode, logs).await
+    deployment::deploy(inventory, options, logs).await
 }
 
 /// Reports a workflow result and its retained diagnostic directory.

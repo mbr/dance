@@ -29,6 +29,8 @@ pub(crate) enum DeploymentPhase {
     Verifying,
     /// Switches the target to the desired system.
     Activating,
+    /// Prunes old generations and unreachable store paths.
+    CollectingGarbage,
 }
 
 impl DeploymentPhase {
@@ -39,6 +41,7 @@ impl DeploymentPhase {
             Self::Preparing => "preparing",
             Self::Verifying => "verifying target",
             Self::Activating => "activating",
+            Self::CollectingGarbage => "collecting garbage",
         }
     }
 
@@ -50,6 +53,7 @@ impl DeploymentPhase {
             Self::Preparing => style.cyan(),
             Self::Verifying => style.yellow(),
             Self::Activating => style.magenta(),
+            Self::CollectingGarbage => style.yellow(),
         }
     }
 }
