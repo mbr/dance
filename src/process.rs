@@ -11,12 +11,11 @@ use std::{
 use futures::{Stream, StreamExt, stream};
 use indicatif::ProgressBar;
 use tokio::{
-    io::{AsyncBufReadExt, AsyncRead, BufReader},
+    io::AsyncRead,
     process::Command,
     time::{self, Instant, MissedTickBehavior},
 };
-use tokio_stream::wrappers::LinesStream;
-use tokio_util::io::InspectReader;
+use tokio_util::io::{InspectReader, ReaderStream};
 
 use crate::{
     error::Error,
@@ -30,8 +29,8 @@ const ERROR_OUTPUT_LINES: usize = 20;
 
 /// Contains a callback used to retain inspected bytes.
 type Inspector = Box<dyn FnMut(&[u8]) + Send>;
-/// Contains a line stream whose underlying bytes are retained.
-type CapturedLines<R> = LinesStream<BufReader<InspectReader<R, Inspector>>>;
+/// Contains a chunk stream whose underlying bytes are retained.
+type CapturedChunks<R> = ReaderStream<InspectReader<R, Inspector>>;
 
 /// Contains the separately captured subprocess output streams.
 struct CapturedOutput {
@@ -71,7 +70,7 @@ impl Capture {
     }
 
     /// Wraps a reader and tees every supplied byte into its sinks.
-    fn lines<R>(&self, reader: R) -> CapturedLines<R>
+    fn chunks<R>(&self, reader: R) -> CapturedChunks<R>
     where
         R: AsyncRead + Unpin,
     {
@@ -89,8 +88,7 @@ impl Capture {
                 }
             }
         });
-        let reader = InspectReader::new(reader, inspector);
-        LinesStream::new(BufReader::new(reader).lines())
+        ReaderStream::new(InspectReader::new(reader, inspector))
     }
 
     /// Takes retained bytes or the first diagnostic failure.
@@ -106,26 +104,22 @@ impl Capture {
     }
 }
 
-/// Returns the last nonempty display line in a text record.
-fn display_message(record: &str) -> Option<String> {
-    let line = record.rsplit(['\r', '\n']).next()?;
-    if line.trim().is_empty() {
-        None
-    } else {
-        Some(line.to_owned())
-    }
-}
-
-/// Displays one coalesced output line.
-fn display_line(progress: &ProgressBar, message: String) {
-    progress.set_message(message);
+/// Returns the last nonempty display line in an output chunk.
+fn display_message(record: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(record)
+        .rsplit(['\r', '\n'])
+        .find(|line| !line.trim().is_empty())
+        .map(str::to_owned)
 }
 
 /// Consumes merged output while periodically displaying its latest line.
-async fn display_output(
-    output: &mut (impl Stream<Item = io::Result<String>> + Unpin),
+async fn display_output<B>(
+    output: &mut (impl Stream<Item = io::Result<B>> + Unpin),
     progress: &ProgressBar,
-) -> io::Result<()> {
+) -> io::Result<()>
+where
+    B: AsRef<[u8]>,
+{
     let mut latest = None;
     let mut refresh = time::interval_at(
         Instant::now() + OUTPUT_REFRESH_INTERVAL,
@@ -138,7 +132,7 @@ async fn display_output(
             record = output.next() => {
                 match record {
                     Some(Ok(record)) => {
-                        if let Some(message) = display_message(&record) {
+                        if let Some(message) = display_message(record.as_ref()) {
                             latest = Some(message);
                         }
                     }
@@ -148,14 +142,14 @@ async fn display_output(
             }
             _ = refresh.tick() => {
                 if let Some(message) = latest.take() {
-                    display_line(progress, message);
+                    progress.set_message(message);
                 }
             }
         }
     }
 
     if let Some(message) = latest {
-        display_line(progress, message);
+        progress.set_message(message);
     }
     Ok(())
 }
@@ -171,8 +165,8 @@ async fn capture_output(
 ) -> Result<CapturedOutput, Error> {
     let stdout_capture = Capture::new(stdout_log);
     let stderr_capture = Capture::new(stderr_log);
-    let stdout = stdout_capture.lines(stdout);
-    let stderr = stderr_capture.lines(stderr);
+    let stdout = stdout_capture.chunks(stdout);
+    let stderr = stderr_capture.chunks(stderr);
     let mut output = stream::select(stdout, stderr);
     display_output(&mut output, progress)
         .await
@@ -350,8 +344,8 @@ async fn run_command(
             return Err(error);
         }
     };
-    command_log.complete(status)?;
     if !status.success() {
+        command_log.complete(status)?;
         return Err(Error::CommandFailed {
             command,
             status,
@@ -359,17 +353,28 @@ async fn run_command(
         });
     }
 
-    String::from_utf8(output.stdout).map_err(|source| Error::CommandOutput { command, source })
+    match String::from_utf8(output.stdout) {
+        Ok(stdout) => {
+            command_log.complete(status)?;
+            Ok(stdout)
+        }
+        Err(source) => {
+            let error = Error::CommandOutput { command, source };
+            command_log.fail(&error.to_string())?;
+            Err(error)
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, path::Path, time::Duration};
+    use std::{ffi::OsString, fs, path::Path, time::Duration};
 
     use indicatif::ProgressBar;
+    use tempfile::tempdir;
     use tokio::{io::AsyncWriteExt, time};
 
-    use super::{OUTPUT_REFRESH_INTERVAL, capture_output, run_status_bounded};
+    use super::{OUTPUT_REFRESH_INTERVAL, capture_output, run, run_status_bounded};
     use crate::{
         error::Error,
         logs::{LogMode, RunLog},
@@ -427,5 +432,40 @@ mod tests {
         assert!(matches!(result, Err(Error::CommandTimedOut { .. })));
         logs.finish(Some("timed out"))
             .expect("disabled logs should finish");
+    }
+
+    /// Checks that output decoding failures are reflected in command metadata.
+    #[tokio::test]
+    async fn invalid_command_output_is_recorded_as_failed() {
+        let base = tempdir().expect("temporary directory should be created");
+        let logs = RunLog::start(
+            LogMode::Always,
+            Some(base.path()),
+            Path::new("inventory.toml"),
+        )
+        .expect("run log should start");
+        let progress = ProgressBar::hidden();
+        let result = run(
+            &logs,
+            "invalid-output",
+            "sh",
+            &[OsString::from("-c"), OsString::from("printf '\\377'")],
+            &progress,
+        )
+        .await;
+        let error = result.expect_err("non-UTF-8 output should fail");
+        assert!(matches!(error, Error::CommandOutput { .. }));
+        let directory = logs
+            .finish(Some("invalid output"))
+            .expect("run log should finish")
+            .expect("always logs should be retained");
+        let manifest =
+            fs::read_to_string(directory.join("run.toml")).expect("manifest should be readable");
+        let command = manifest
+            .split_once("[[commands]]")
+            .expect("manifest should contain a command")
+            .1;
+        assert!(command.contains("status = \"failed\""));
+        assert!(command.contains("returned non-UTF-8 output"));
     }
 }

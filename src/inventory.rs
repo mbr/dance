@@ -1,38 +1,15 @@
-//! Inventory parsing and host operations.
+//! Inventory parsing and deployment metadata.
 
 use std::{
     collections::HashSet,
     fs,
-    num::NonZeroU32,
     path::{Path, PathBuf},
-    time::Duration,
 };
 
 use indexmap::IndexMap;
-use indicatif::ProgressBar;
 use serde::Deserialize;
-use uuid::Uuid;
 
-use crate::{
-    error::Error,
-    logs::RunLog,
-    process::{run, run_bounded, run_status, run_status_bounded},
-    store_path::StorePath,
-};
-
-/// Limits how long target activation may run.
-pub(crate) const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(240);
-/// Gives an activation rollback watchdog time to fire after a local timeout.
-const ACTIVATION_ROLLBACK_TIMEOUT: u64 = 360;
-/// Limits routine SSH operations.
-const SSH_TIMEOUT: Duration = Duration::from_secs(60);
-/// Gives verification and watchdog disarming a bounded completion window.
-const VERIFICATION_ROLLBACK_TIMEOUT: u64 = 180;
-/// Identifies one armed target-side rollback watchdog.
-pub(crate) struct RollbackWatchdog {
-    /// Contains the transient systemd unit stem.
-    unit: String,
-}
+use crate::error::Error;
 
 /// Contains the hosts managed by Dance.
 #[derive(Deserialize)]
@@ -152,300 +129,6 @@ impl Host {
     pub(crate) fn ssh_url(&self) -> String {
         format!("root@{}", self.ssh_host)
     }
-
-    /// Reads the system currently activated on the target.
-    pub(crate) async fn deployed_store_path(
-        &self,
-        phase: &str,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<StorePath, Error> {
-        let label = format!("{phase}-{}-remote", self.id);
-        let output = run_bounded(
-            logs,
-            &label,
-            "ssh",
-            &[
-                self.ssh_url().into(),
-                "readlink -f /run/current-system".into(),
-            ],
-            SSH_TIMEOUT,
-            progress,
-        )
-        .await?;
-        let value = output.trim();
-        value.parse().map_err(|source| Error::InvalidStorePath {
-            path: value.to_owned(),
-            source,
-        })
-    }
-
-    /// Evaluates the desired system without building it.
-    pub(crate) async fn expected_store_path(
-        &self,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<StorePath, Error> {
-        let label = format!("review-{}-local", self.id);
-        let output = run(
-            logs,
-            &label,
-            "nix",
-            &["eval".into(), "--raw".into(), self.flake_output().into()],
-            progress,
-        )
-        .await?;
-        let value = output.trim();
-        value.parse().map_err(|source| Error::InvalidStorePath {
-            path: value.to_owned(),
-            source,
-        })
-    }
-
-    /// Builds the host configuration and an optional additional installable.
-    pub(crate) async fn build(
-        &self,
-        additional_installable: Option<&str>,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
-        let label = format!("deploy-{}-build", self.id);
-        let mut arguments = vec![
-            "build".into(),
-            "--no-link".into(),
-            self.flake_output().into(),
-        ];
-        if let Some(installable) = additional_installable {
-            arguments.push(installable.into());
-        }
-        run_status(logs, &label, "nix", &arguments, progress).await
-    }
-
-    /// Copies a built system to the target and performs a dry activation.
-    pub(crate) async fn prepare_activation(
-        &self,
-        store_path: &StorePath,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
-        let label = format!("deploy-{}-prepare", self.id);
-        run_status(
-            logs,
-            &label,
-            "nixos-rebuild",
-            &[
-                "dry-activate".into(),
-                "--use-substitutes".into(),
-                "--store-path".into(),
-                store_path.as_ref().as_os_str().to_owned(),
-                "--target-host".into(),
-                self.ssh_url().into(),
-            ],
-            progress,
-        )
-        .await
-    }
-
-    /// Activates a locally built system on the target within the activation deadline.
-    pub(crate) async fn activate(
-        &self,
-        store_path: &StorePath,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
-        let label = format!("deploy-{}-activate", self.id);
-        run_status_bounded(
-            logs,
-            &label,
-            "nixos-rebuild",
-            &[
-                "switch".into(),
-                "--use-substitutes".into(),
-                "--store-path".into(),
-                store_path.as_ref().as_os_str().to_owned(),
-                "--target-host".into(),
-                self.ssh_url().into(),
-            ],
-            &[],
-            ACTIVATION_TIMEOUT,
-            progress,
-        )
-        .await
-    }
-
-    /// Arms a target-side rollback watchdog for the reviewed system.
-    pub(crate) async fn arm_rollback(
-        &self,
-        previous: &StorePath,
-        verification: bool,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<RollbackWatchdog, Error> {
-        let phase = if verification {
-            "verification"
-        } else {
-            "activation"
-        };
-        let timeout = if verification {
-            VERIFICATION_ROLLBACK_TIMEOUT
-        } else {
-            ACTIVATION_ROLLBACK_TIMEOUT
-        };
-        let unit = format!("dance-rollback-{}", Uuid::now_v7());
-        let rollback = self.rollback_command(previous);
-        let command = format!(
-            "systemd-run --quiet --collect --unit={} --on-active={}s --property=Type=oneshot -- /bin/sh -c {}",
-            shell_quote(&unit),
-            timeout,
-            shell_quote(&rollback)
-        );
-        let label = format!("deploy-{}-arm-{phase}-rollback", self.id);
-        run_status_bounded(
-            logs,
-            &label,
-            "ssh",
-            &[self.ssh_url().into(), command.into()],
-            &[],
-            SSH_TIMEOUT,
-            progress,
-        )
-        .await?;
-        Ok(RollbackWatchdog { unit })
-    }
-
-    /// Disarms a target-side rollback watchdog.
-    pub(crate) async fn disarm_rollback(
-        &self,
-        watchdog: &RollbackWatchdog,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
-        let label = format!("deploy-{}-disarm-rollback", self.id);
-        let command = format!("systemctl stop {}.timer", shell_quote(&watchdog.unit));
-        run_status_bounded(
-            logs,
-            &label,
-            "ssh",
-            &[self.ssh_url().into(), command.into()],
-            &[],
-            SSH_TIMEOUT,
-            progress,
-        )
-        .await
-    }
-
-    /// Immediately restores a reviewed system and disarms its watchdogs.
-    pub(crate) async fn rollback(
-        &self,
-        previous: &StorePath,
-        watchdogs: &[RollbackWatchdog],
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
-        let watchdog = watchdogs
-            .last()
-            .expect("rollback should have an armed watchdog");
-        let label = format!("deploy-{}-rollback", self.id);
-        let command = format!("systemctl start {}.service", shell_quote(&watchdog.unit));
-        run_status_bounded(
-            logs,
-            &label,
-            "ssh",
-            &[self.ssh_url().into(), command.into()],
-            &[],
-            SSH_TIMEOUT,
-            progress,
-        )
-        .await?;
-
-        let current = self
-            .deployed_store_path("verify-rollback", logs, progress)
-            .await?;
-        if &current != previous {
-            return Err(Error::RollbackMismatch {
-                host: self.id.clone(),
-                expected: previous.clone(),
-                current,
-            });
-        }
-        for watchdog in watchdogs {
-            self.disarm_rollback(watchdog, logs, progress).await?;
-        }
-        Ok(())
-    }
-
-    /// Prunes old generations and collects the target's unreachable store paths.
-    pub(crate) async fn collect_garbage(
-        &self,
-        keep_generations: NonZeroU32,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
-        let label = format!("deploy-{}-prune-generations", self.id);
-        run_status(
-            logs,
-            &label,
-            "ssh",
-            &[
-                self.ssh_url().into(),
-                "nix-env".into(),
-                "--profile".into(),
-                "/nix/var/nix/profiles/system".into(),
-                "--delete-generations".into(),
-                format!("+{keep_generations}").into(),
-            ],
-            progress,
-        )
-        .await?;
-
-        let label = format!("deploy-{}-refresh-bootloader", self.id);
-        run_status(
-            logs,
-            &label,
-            "ssh",
-            &[
-                self.ssh_url().into(),
-                "/run/current-system/bin/switch-to-configuration".into(),
-                "boot".into(),
-            ],
-            progress,
-        )
-        .await?;
-
-        let label = format!("deploy-{}-collect-garbage", self.id);
-        run_status(
-            logs,
-            &label,
-            "ssh",
-            &[self.ssh_url().into(), "nix-store".into(), "--gc".into()],
-            progress,
-        )
-        .await
-    }
-
-    /// Returns the complete flake output used to evaluate the system path.
-    fn flake_output(&self) -> String {
-        format!(
-            "{}#nixosConfigurations.{}.config.system.build.toplevel.outPath",
-            self.flake_path.display(),
-            self.flake_name
-        )
-    }
-
-    /// Returns the remote command that restores a reviewed system.
-    fn rollback_command(&self, previous: &StorePath) -> String {
-        let previous = previous.to_string();
-        format!(
-            "/run/current-system/sw/bin/nix-env --profile /nix/var/nix/profiles/system --set {} && {}/bin/switch-to-configuration switch",
-            shell_quote(&previous),
-            shell_quote(&previous)
-        )
-    }
-}
-
-/// Quotes one value for a POSIX-compatible remote shell.
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
@@ -454,7 +137,7 @@ mod tests {
 
     use indexmap::IndexMap;
 
-    use super::{Host, Inventory, shell_quote};
+    use super::{Host, Inventory};
     use crate::error::Error;
 
     /// Creates a minimal inventory with hosts in the given order.
@@ -530,11 +213,5 @@ flake_name = "www"
             duplicate,
             Err(Error::DuplicateSelectedId { id }) if id == "www"
         ));
-    }
-
-    /// Checks that values remain one argument in remote shell commands.
-    #[test]
-    fn quotes_remote_shell_values() {
-        assert_eq!(shell_quote("one'two"), "'one'\"'\"'two'");
     }
 }

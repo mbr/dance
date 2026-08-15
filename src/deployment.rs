@@ -1,6 +1,9 @@
 //! Concurrent review and deployment coordination.
 
-mod host;
+mod activation;
+mod operations;
+mod review;
+mod rollback;
 
 use std::{
     io::{self, IsTerminal},
@@ -11,7 +14,10 @@ use dialoguer::{Confirm, console::style, theme::ColorfulTheme};
 use futures::future::join_all;
 use tabled::Table;
 
-use self::host::{ActivationOutcome, HostRow, ReviewOutcome, ReviewedHost};
+use self::{
+    activation::{Options as ActivationOptions, Outcome as ActivationOutcome},
+    review::{HostRow, ReviewOutcome, ReviewedHost},
+};
 use crate::{
     error::Error,
     inventory::Inventory,
@@ -73,9 +79,11 @@ pub(crate) async fn deploy(
 
     let activation = activate(
         outdated,
-        options.keep_generations,
-        !options.skip_verifier,
-        options.rollback,
+        ActivationOptions {
+            include_verifier: !options.skip_verifier,
+            rollback: options.rollback,
+            keep_generations: options.keep_generations,
+        },
         logs,
     )
     .await;
@@ -96,7 +104,7 @@ async fn collect(
     let deployed = join_all(
         hosts
             .iter()
-            .map(|host| host::deployed(host, logs, &progress)),
+            .map(|host| review::deployed(host, logs, &progress)),
     );
     let local = async {
         let updates = if update_flakes {
@@ -106,10 +114,10 @@ async fn collect(
         };
         let expected = join_all(hosts.iter().map(|host| async {
             if updates.failed(host.flake_path()) {
-                host::skip_expected(host, &progress);
+                review::skip_expected(host, &progress);
                 None
             } else {
-                Some(host::expected(host, logs, &progress).await)
+                Some(review::expected(host, logs, &progress).await)
             }
         }))
         .await;
@@ -127,7 +135,7 @@ async fn collect(
         let outcome = match deployed {
             Err(error) => Err(error),
             Ok(deployed) => match expected {
-                Some(Ok(expected)) => Ok(host::review(host, deployed, expected)),
+                Some(Ok(expected)) => Ok(review::review(host, deployed, expected)),
                 Some(Err(error)) => Err(error),
                 None => {
                     row.fail();
@@ -191,24 +199,14 @@ fn confirm() -> Result<bool, Error> {
 /// Builds, prepares, and activates all reviewed hosts concurrently.
 async fn activate(
     reviewed: Vec<ReviewedHost>,
-    keep_generations: Option<NonZeroU32>,
-    include_verifier: bool,
-    rollback: bool,
+    options: ActivationOptions,
     logs: &RunLog,
 ) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
     let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
-            let outcome = host::activate(
-                host,
-                keep_generations,
-                include_verifier,
-                rollback,
-                logs,
-                progress,
-            )
-            .await;
+            let outcome = activation::activate(host, options, logs, progress).await;
             if !matches!(&outcome, ActivationOutcome::Activated) {
                 status::fail(progress);
             }

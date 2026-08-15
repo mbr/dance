@@ -18,10 +18,10 @@ const HOST_TEMPLATE: &str = "{spinner} {prefix} {wide_msg}";
 const SPINNER_TICKS: &str =
     "\u{280b}\u{2819}\u{2839}\u{2838}\u{283c}\u{2834}\u{2826}\u{2827}\u{2807}\u{280f} ";
 
-/// Identifies a phase of an outdated host's deployment.
+/// Identifies a phase of host work.
 #[derive(Clone, Copy)]
 pub(crate) enum DeploymentPhase {
-    /// Builds the desired system.
+    /// Builds local derivations.
     Building,
     /// Copies the system and performs a dry activation.
     Preparing,
@@ -123,7 +123,7 @@ pub(crate) fn verifier_missing(progress: &ProgressBar, host: &str) {
     finish_with_status(progress, host, "not configured");
 }
 
-/// Marks a host deployment as failed while retaining its phase.
+/// Marks host work as failed while retaining its phase.
 pub(crate) fn fail(progress: &ProgressBar) {
     let failed = style("failed").for_stderr().red();
     progress.finish_with_message(format!("{failed}"));
