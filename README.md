@@ -43,6 +43,8 @@ Other ways to run Dance:
 dance                     # Review every server
 dance www                 # Review only the www inventory entry
 dance --update www        # Update the production flake during review
+dance --update --review-only www # Update and review without deploying
+dance --yes www           # Deploy without confirmation
 ```
 
 ## Logs

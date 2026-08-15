@@ -17,10 +17,21 @@ use crate::{
     update::{self, UpdateOutcome},
 };
 
+/// Selects how Dance proceeds after reviewing outdated hosts.
+pub(crate) enum Mode {
+    /// Requests interactive approval.
+    Confirm,
+    /// Deploys without requesting approval.
+    Approved,
+    /// Stops after collecting host information.
+    ReviewOnly,
+}
+
 /// Runs the concurrent deployment workflow.
 pub(crate) async fn deploy(
     inventory: Inventory,
     update_flakes: bool,
+    mode: Mode,
     logs: &RunLog,
 ) -> Result<(), Error> {
     let flakes = inventory.flake_groups();
@@ -103,18 +114,27 @@ pub(crate) async fn deploy(
     if reviewed.is_empty() {
         return first_error.map_or(Ok(()), Err);
     }
+    if matches!(mode, Mode::ReviewOnly) {
+        println!("deployment: skipped");
+        return first_error.map_or(Ok(()), Err);
+    }
+    if matches!(mode, Mode::Confirm) && !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
+        return Err(Error::ConfirmationRequired);
+    }
 
     let theme = ColorfulTheme {
         success_prefix: style(">".to_owned()).for_stderr().green(),
         ..ColorfulTheme::default()
     };
-    let approved = Confirm::with_theme(&theme)
-        .with_prompt("Deploy the outdated systems?")
-        .default(false)
-        .interact()
-        .map_err(|source| Error::Confirmation { source })?;
-    if !approved {
-        return first_error.map_or(Ok(()), Err);
+    if matches!(mode, Mode::Confirm) {
+        let approved = Confirm::with_theme(&theme)
+            .with_prompt("Deploy the outdated systems?")
+            .default(false)
+            .interact()
+            .map_err(|source| Error::Confirmation { source })?;
+        if !approved {
+            return first_error.map_or(Ok(()), Err);
+        }
     }
 
     let activation = activate(reviewed, logs).await;

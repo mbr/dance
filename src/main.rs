@@ -30,6 +30,12 @@ struct Cli {
     /// Updates selected flakes during review.
     #[arg(long)]
     update: bool,
+    /// Deploys without requesting confirmation.
+    #[arg(short, long, conflicts_with = "review_only")]
+    yes: bool,
+    /// Stops after updating and collecting host information.
+    #[arg(long)]
+    review_only: bool,
     /// Selects when command logs are retained.
     #[arg(long, env = "DANCE_LOGS", value_enum, default_value = "on-error")]
     logs: LogMode,
@@ -43,8 +49,15 @@ struct Cli {
 
 /// Runs the deployment workflow.
 async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
+    let mode = if cli.yes {
+        deployment::Mode::Approved
+    } else if cli.review_only {
+        deployment::Mode::ReviewOnly
+    } else {
+        deployment::Mode::Confirm
+    };
     let inventory = Inventory::load(&cli.inventory)?.select(&cli.ids)?;
-    deployment::deploy(inventory, cli.update, logs).await
+    deployment::deploy(inventory, cli.update, mode, logs).await
 }
 
 /// Reports whether the deployment workflow succeeded.
