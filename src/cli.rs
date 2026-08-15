@@ -12,6 +12,7 @@ use crate::logs::LogMode;
 pub(crate) struct Cli {
     /// Selects the host inventory.
     #[arg(
+        short,
         long,
         env = "DANCE_INVENTORY",
         default_value = "inventory.toml",
@@ -20,6 +21,7 @@ pub(crate) struct Cli {
     pub(crate) inventory: PathBuf,
     /// Selects when command logs are retained.
     #[arg(
+        short,
         long,
         env = "DANCE_LOGS",
         value_enum,
@@ -28,7 +30,7 @@ pub(crate) struct Cli {
     )]
     pub(crate) logs: LogMode,
     /// Overrides the command log directory.
-    #[arg(long, env = "DANCE_LOGS_DIR", global = true)]
+    #[arg(short = 'L', long, env = "DANCE_LOGS_DIR", global = true)]
     pub(crate) logs_dir: Option<PathBuf>,
     /// Selects the operation to perform.
     #[command(subcommand)]
@@ -50,7 +52,7 @@ pub(crate) enum Command {
 #[derive(Args, Debug)]
 pub(crate) struct WorkflowArgs {
     /// Updates selected flakes during review.
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) update: bool,
     /// Limits the workflow to these inventory IDs.
     #[arg(value_name = "ID")]
@@ -75,15 +77,15 @@ pub(crate) struct DeployArgs {
     #[arg(short, long)]
     pub(crate) yes: bool,
     /// Skips configured flake verifiers.
-    #[arg(long)]
+    #[arg(short, long)]
     pub(crate) skip_verifier: bool,
     /// Leaves a failed activation in place instead of rolling it back.
-    #[arg(long)]
+    #[arg(short = 'R', long)]
     pub(crate) no_rollback: bool,
     /// Retains this many system generations after deployment.
-    #[arg(long, default_value = "2")]
+    #[arg(short, long, default_value = "2")]
     pub(crate) keep_generations: NonZeroU32,
     /// Skips post-deployment garbage collection.
-    #[arg(long, conflicts_with = "keep_generations")]
+    #[arg(short = 'G', long, conflicts_with = "keep_generations")]
     pub(crate) no_gc: bool,
 }
