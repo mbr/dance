@@ -2,7 +2,6 @@
 
 use std::{
     collections::HashSet,
-    ffi::OsString,
     fs,
     num::NonZeroU32,
     path::{Path, PathBuf},
@@ -19,15 +18,14 @@ use crate::{
     logs::RunLog,
     process::{run, run_bounded, run_status, run_status_bounded},
     store_path::StorePath,
-    verifier::{self, Verifier},
 };
 
 /// Limits how long target activation may run.
 pub(crate) const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(240);
 /// Gives an activation rollback watchdog time to fire after a local timeout.
 const ACTIVATION_ROLLBACK_TIMEOUT: u64 = 360;
-/// Limits routine SSH operations and configured verifiers.
-const VERIFICATION_TIMEOUT: Duration = Duration::from_secs(60);
+/// Limits routine SSH operations.
+const SSH_TIMEOUT: Duration = Duration::from_secs(60);
 /// Gives verification and watchdog disarming a bounded completion window.
 const VERIFICATION_ROLLBACK_TIMEOUT: u64 = 180;
 /// Identifies one armed target-side rollback watchdog.
@@ -135,6 +133,11 @@ impl Host {
         &self.flake_path
     }
 
+    /// Returns the NixOS configuration name within the flake.
+    pub(crate) fn flake_name(&self) -> &str {
+        &self.flake_name
+    }
+
     /// Returns the display form of the flake selector.
     pub(crate) fn flake(&self) -> String {
         let name = self
@@ -166,7 +169,7 @@ impl Host {
                 self.ssh_url().into(),
                 "readlink -f /run/current-system".into(),
             ],
-            VERIFICATION_TIMEOUT,
+            SSH_TIMEOUT,
             progress,
         )
         .await?;
@@ -199,19 +202,10 @@ impl Host {
         })
     }
 
-    /// Discovers an optional verifier for this host's NixOS configuration.
-    pub(crate) async fn verifier(
-        &self,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<Option<Verifier>, Error> {
-        verifier::discover(&self.id, &self.flake_path, &self.flake_name, logs, progress).await
-    }
-
-    /// Builds the host configuration and verifier in the local Nix store.
+    /// Builds the host configuration and an optional additional installable.
     pub(crate) async fn build(
         &self,
-        verifier: Option<&Verifier>,
+        additional_installable: Option<&str>,
         logs: &RunLog,
         progress: &ProgressBar,
     ) -> Result<(), Error> {
@@ -221,38 +215,10 @@ impl Host {
             "--no-link".into(),
             self.flake_output().into(),
         ];
-        if let Some(verifier) = verifier {
-            arguments.push(
-                verifier
-                    .installable(&self.flake_path, &self.flake_name)
-                    .into(),
-            );
+        if let Some(installable) = additional_installable {
+            arguments.push(installable.into());
         }
         run_status(logs, &label, "nix", &arguments, progress).await
-    }
-
-    /// Builds only the configured verifier in the local Nix store.
-    pub(crate) async fn build_verifier(
-        &self,
-        verifier: &Verifier,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
-        let label = format!("verify-{}-build", self.id);
-        run_status(
-            logs,
-            &label,
-            "nix",
-            &[
-                "build".into(),
-                "--no-link".into(),
-                verifier
-                    .installable(&self.flake_path, &self.flake_name)
-                    .into(),
-            ],
-            progress,
-        )
-        .await
     }
 
     /// Copies a built system to the target and performs a dry activation.
@@ -307,30 +273,6 @@ impl Host {
         .await
     }
 
-    /// Runs a built verifier on the deployment machine.
-    pub(crate) async fn verify(
-        &self,
-        verifier: &Verifier,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
-        let label = format!("verify-{}-run", self.id);
-        let environment = [
-            ("DANCE_HOST_ID", OsString::from(&self.id)),
-            ("DANCE_SSH_TARGET", OsString::from(self.ssh_url())),
-        ];
-        run_status_bounded(
-            logs,
-            &label,
-            &verifier.executable(),
-            &[],
-            &environment,
-            VERIFICATION_TIMEOUT,
-            progress,
-        )
-        .await
-    }
-
     /// Arms a target-side rollback watchdog for the reviewed system.
     pub(crate) async fn arm_rollback(
         &self,
@@ -364,7 +306,7 @@ impl Host {
             "ssh",
             &[self.ssh_url().into(), command.into()],
             &[],
-            VERIFICATION_TIMEOUT,
+            SSH_TIMEOUT,
             progress,
         )
         .await?;
@@ -386,7 +328,7 @@ impl Host {
             "ssh",
             &[self.ssh_url().into(), command.into()],
             &[],
-            VERIFICATION_TIMEOUT,
+            SSH_TIMEOUT,
             progress,
         )
         .await
@@ -411,7 +353,7 @@ impl Host {
             "ssh",
             &[self.ssh_url().into(), command.into()],
             &[],
-            VERIFICATION_TIMEOUT,
+            SSH_TIMEOUT,
             progress,
         )
         .await?;

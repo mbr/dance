@@ -10,7 +10,6 @@ mod status;
 mod store_path;
 mod update;
 mod verification;
-mod verifier;
 
 use std::{path::PathBuf, process::ExitCode};
 

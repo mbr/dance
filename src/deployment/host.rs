@@ -14,6 +14,7 @@ use crate::{
     logs::RunLog,
     status::{self, DeploymentPhase},
     store_path::StorePath,
+    verification::Verifier,
 };
 
 /// Describes a host's state during deployment review.
@@ -245,15 +246,22 @@ pub(super) async fn activate(
 ) -> ActivationOutcome {
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Building);
     let verifier = if include_verifier {
-        match reviewed.host.verifier(logs, progress).await {
+        match Verifier::discover(&reviewed.host, logs, progress).await {
             Ok(verifier) => verifier,
             Err(error) => return ActivationOutcome::ActivationFailed(error),
         }
     } else {
         None
     };
+    let verifier_installable = verifier
+        .as_ref()
+        .map(|verifier| verifier.installable(&reviewed.host));
 
-    if let Err(error) = reviewed.host.build(verifier.as_ref(), logs, progress).await {
+    if let Err(error) = reviewed
+        .host
+        .build(verifier_installable.as_deref(), logs, progress)
+        .await
+    {
         return ActivationOutcome::ActivationFailed(error);
     }
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Preparing);
@@ -371,7 +379,7 @@ pub(super) async fn activate(
             reviewed.host.id(),
             DeploymentPhase::RunningVerifier,
         );
-        if let Err(error) = reviewed.host.verify(verifier, logs, progress).await {
+        if let Err(error) = verifier.run(&reviewed.host, logs, progress).await {
             return if rollback_enabled {
                 rollback(&reviewed, &watchdogs, error, logs, progress).await
             } else {
