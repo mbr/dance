@@ -191,8 +191,8 @@ struct VerifierRecord {
 enum Outcome {
     /// The configured verifier succeeded.
     Verified,
-    /// The host has no configured verifier.
-    NotConfigured,
+    /// The host was skipped because no verifier is configured.
+    Skipped,
     /// Verifier discovery, building, or execution failed.
     Failed(Error),
 }
@@ -204,7 +204,7 @@ async fn verify_host(host: Host, logs: &RunLog, progress: &ProgressBar) -> Outco
         Ok(Some(verifier)) => verifier,
         Ok(None) => {
             status::verifier_missing(progress, host.id());
-            return Outcome::NotConfigured;
+            return Outcome::Skipped;
         }
         Err(error) => return Outcome::Failed(error),
     };
@@ -239,20 +239,20 @@ pub(crate) async fn verify(inventory: Inventory, logs: &RunLog) -> Result<(), Er
     .await;
 
     let mut verified = 0;
-    let mut not_configured = 0;
+    let mut skipped = 0;
     let mut failed = 0;
     let mut first_error = None;
     for outcome in outcomes {
         match outcome {
             Outcome::Verified => verified += 1,
-            Outcome::NotConfigured => not_configured += 1,
+            Outcome::Skipped => skipped += 1,
             Outcome::Failed(error) => {
                 failed += 1;
                 first_error.get_or_insert(error);
             }
         }
     }
-    println!("verification: {verified} passed, {not_configured} not configured, {failed} failed");
+    println!("verification: {verified} passed, {skipped} skipped, {failed} failed");
     first_error.map_or(Ok(()), Err)
 }
 

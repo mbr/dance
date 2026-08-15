@@ -118,9 +118,15 @@ pub(crate) fn verified(progress: &ProgressBar, host: &str) {
     finish_with_status(progress, host, "verified");
 }
 
-/// Marks a host without a configured verifier.
+/// Marks a host without a configured verifier as skipped.
 pub(crate) fn verifier_missing(progress: &ProgressBar, host: &str) {
-    finish_with_status(progress, host, "not configured");
+    set_status(
+        progress,
+        host,
+        "skipped",
+        Style::new().for_stderr().yellow(),
+    );
+    progress.finish_with_message("no verifier configured");
 }
 
 /// Marks host work as failed while retaining its phase.
