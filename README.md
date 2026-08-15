@@ -1,37 +1,46 @@
 # Dance
 
-Dance reviews and deploys NixOS configurations across a small fleet. It compares each target's active system with its local flake output, presents the pending changes for confirmation, then builds, prepares, activates, and verifies outdated hosts concurrently.
+A tool for deploying servers with `nixos-rebuild`. Everything you wished your pet k3s cluster was, and more. It's a companion to the still-unreleased provisioning tool named `prom`, hence the name.
+
+At its core, Dance takes servers defined in local Nix flakes and deploys them over SSH. A flake can define one server or several related servers. A few conveniences come with that:
+
+- An inventory keeps short server IDs and SSH addresses in one place.
+- Review and deployment run in parallel across multiple servers.
+- `--update` updates the inputs of all selected flakes before deployment.
+- Systems are built locally and transferred with Nix.
+- No separate deployment state is kept: Dance checks `/run/current-system` to determine whether an update is needed.
 
 ## Usage
 
-Run Dance from a directory containing `inventory.toml`:
-
-```console
-dance                     # Review every host
-dance www party           # Review only named hosts
-dance --update party      # Update Party's flake inputs before review
-dance --inventory hosts.toml
-```
-
-`DANCE_INVENTORY` provides an alternative default inventory path. Host arguments refer to unique inventory `name` values and preserve inventory order. `--update` runs `nix flake update` once for each distinct flake selected by the invocation; lock-file changes remain even if deployment is declined or fails.
-
-An inventory contains one entry per target:
+Run Dance from a directory containing `inventory.toml` (override through either `DANCE_INVENTORY` or `--inventory`):
 
 ```toml
-[[hosts]]
-name = "www"
-description = "Static web server"
+# `www` is the ID used on the command line and in output.
+[hosts.www]
+# Hostname or SSH configuration alias used to reach the machine.
 ssh_host = "www.example.com"
-flake_path = "../www"
-flake_name = "www"
+# Flake directory, relative to this inventory.
+flake_path = "../production"
+# Server configuration within the flake.
+flake_name = "web-server"
 ```
 
-Dance requires `nix`, `nixos-rebuild`, and SSH access as `root` to each target. Review failures are shown without blocking valid outdated hosts. Before activation, Dance checks that the target has not changed since review; afterward, it verifies that the expected system is active.
+Running
 
-## Development
+```console
+dance
+```
 
-The Nix flake provides the package and development shell. Run `cargo test` and `./check.sh` to validate changes, then `./format.sh`.
+compares the active system on `www.example.com` with the system defined locally. If they differ, Dance asks for confirmation, builds locally, dry-activates, and verifies the target before and after switching. This is roughly equivalent to:
 
-## License
+```console
+nixos-rebuild switch --flake ../production#web-server --target-host root@www.example.com
+```
 
-Licensed under either the Apache License, Version 2.0 or the MIT license, at your option.
+Other ways to run Dance:
+
+```console
+dance                     # Review every server
+dance www                 # Review only the www inventory entry
+dance --update www        # Update the production flake before review
+```
