@@ -77,6 +77,12 @@ danceVerifiers.${system}.web-server = pkgs.writeShellApplication {
 
 Dance runs the verifier on the deployment machine with `DANCE_HOST_ID` and `DANCE_SSH_TARGET` in its environment. The verifier can use the latter for internal checks such as `ssh "$DANCE_SSH_TARGET" systemctl is-active caddy.service`.
 
+Run verifiers without deploying:
+
+```console
+dance verify www
+```
+
 ## Logs
 
 Dance keeps command output under `$XDG_STATE_HOME/dance/logs` when a run fails. Use `--logs always` to keep successful runs, `--logs never` to disable logs, or `--logs-dir` to change their location.

@@ -9,6 +9,7 @@ mod process;
 mod status;
 mod store_path;
 mod update;
+mod verification;
 mod verifier;
 
 use std::{path::PathBuf, process::ExitCode};
@@ -41,6 +42,10 @@ async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
                 keep_generations: (!args.no_gc).then_some(args.keep_generations),
             };
             deployment::deploy(inventory, options, logs).await
+        }
+        Command::Verify(args) => {
+            let inventory = inventory.select(&args.ids)?;
+            verification::verify(inventory, logs).await
         }
     }
 }

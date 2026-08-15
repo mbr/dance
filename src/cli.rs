@@ -42,6 +42,8 @@ pub(crate) enum Command {
     Review(WorkflowArgs),
     /// Reviews and deploys outdated systems.
     Deploy(DeployArgs),
+    /// Runs configured verifiers without deploying.
+    Verify(VerifyArgs),
 }
 
 /// Configures the review phase shared by each workflow.
@@ -51,6 +53,14 @@ pub(crate) struct WorkflowArgs {
     #[arg(long)]
     pub(crate) update: bool,
     /// Limits the workflow to these inventory IDs.
+    #[arg(value_name = "ID")]
+    pub(crate) ids: Vec<String>,
+}
+
+/// Selects hosts for verifier execution.
+#[derive(Args, Debug)]
+pub(crate) struct VerifyArgs {
+    /// Limits verification to these inventory IDs.
     #[arg(value_name = "ID")]
     pub(crate) ids: Vec<String>,
 }

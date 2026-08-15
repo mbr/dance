@@ -92,7 +92,7 @@ pub(crate) async fn discover(
     logs: &RunLog,
     progress: &ProgressBar,
 ) -> Result<Option<Verifier>, Error> {
-    let metadata_label = format!("deploy-{host}-flake-metadata");
+    let metadata_label = format!("verify-{host}-flake-metadata");
     let metadata = run(
         logs,
         &metadata_label,
@@ -119,7 +119,7 @@ pub(crate) async fn discover(
     let expression = format!(
         "let flakeReference = {flake_reference}; flakeName = {flake_name}; in ({VERIFIER_EXPRESSION})"
     );
-    let label = format!("deploy-{host}-verifier");
+    let label = format!("verify-{host}-evaluate");
     let output = run(
         logs,
         &label,

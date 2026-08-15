@@ -101,16 +101,26 @@ pub(crate) fn set_phase(progress: &ProgressBar, host: &str, phase: DeploymentPha
     set_status(progress, host, phase.label(), phase.style());
 }
 
+/// Finishes a host status line successfully.
+fn finish_with_status(progress: &ProgressBar, host: &str, status: &str) {
+    let message = progress.message();
+    set_status(progress, host, status, Style::new().for_stderr().green());
+    progress.finish_with_message(message);
+}
+
 /// Marks a host as successfully activated.
 pub(crate) fn finish(progress: &ProgressBar, host: &str) {
-    let message = progress.message();
-    set_status(
-        progress,
-        host,
-        "activated",
-        Style::new().for_stderr().green(),
-    );
-    progress.finish_with_message(message);
+    finish_with_status(progress, host, "activated");
+}
+
+/// Marks a host verifier as successful.
+pub(crate) fn verified(progress: &ProgressBar, host: &str) {
+    finish_with_status(progress, host, "verified");
+}
+
+/// Marks a host without a configured verifier.
+pub(crate) fn verifier_missing(progress: &ProgressBar, host: &str) {
+    finish_with_status(progress, host, "not configured");
 }
 
 /// Marks a host deployment as failed while retaining its phase.

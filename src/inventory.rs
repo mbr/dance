@@ -231,6 +231,30 @@ impl Host {
         run_status(logs, &label, "nix", &arguments, progress).await
     }
 
+    /// Builds only the configured verifier in the local Nix store.
+    pub(crate) async fn build_verifier(
+        &self,
+        verifier: &Verifier,
+        logs: &RunLog,
+        progress: &ProgressBar,
+    ) -> Result<(), Error> {
+        let label = format!("verify-{}-build", self.id);
+        run_status(
+            logs,
+            &label,
+            "nix",
+            &[
+                "build".into(),
+                "--no-link".into(),
+                verifier
+                    .installable(&self.flake_path, &self.flake_name)
+                    .into(),
+            ],
+            progress,
+        )
+        .await
+    }
+
     /// Copies a built system to the target and performs a dry activation.
     pub(crate) async fn prepare_activation(
         &self,
@@ -290,7 +314,7 @@ impl Host {
         logs: &RunLog,
         progress: &ProgressBar,
     ) -> Result<(), Error> {
-        let label = format!("deploy-{}-verify", self.id);
+        let label = format!("verify-{}-run", self.id);
         let environment = [
             ("DANCE_HOST_ID", OsString::from(&self.id)),
             ("DANCE_SSH_TARGET", OsString::from(self.ssh_url())),
