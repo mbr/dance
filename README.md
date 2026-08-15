@@ -7,7 +7,7 @@ At its core, Dance takes servers defined in local Nix flakes and deploys them ov
 - An inventory keeps short server IDs and SSH addresses in one place.
 - Review and deployment run in parallel across multiple servers.
 - `--update` updates the inputs of all selected flakes during review.
-- Systems are built locally and transferred with Nix.
+- Systems are built locally; servers fetch available substitutes and receive the remaining paths over SSH.
 - No separate deployment state is kept: Dance checks `/run/current-system` to determine whether an update is needed.
 
 ## Usage
@@ -34,7 +34,7 @@ dance
 compares the active system on `www.example.com` with the system defined locally. If they differ, Dance asks for confirmation, builds locally, dry-activates, and verifies the target before and after switching. This is roughly equivalent to:
 
 ```console
-nixos-rebuild switch --flake ../production#web-server --target-host root@www.example.com
+nixos-rebuild switch --use-substitutes --flake ../production#web-server --target-host root@www.example.com
 ```
 
 After a deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup.

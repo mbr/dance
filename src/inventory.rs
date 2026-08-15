@@ -212,6 +212,7 @@ impl Host {
             "nixos-rebuild",
             &[
                 "dry-activate".into(),
+                "--use-substitutes".into(),
                 "--store-path".into(),
                 store_path.as_ref().as_os_str().to_owned(),
                 "--target-host".into(),
@@ -236,6 +237,7 @@ impl Host {
             "nixos-rebuild",
             &[
                 "switch".into(),
+                "--use-substitutes".into(),
                 "--store-path".into(),
                 store_path.as_ref().as_os_str().to_owned(),
                 "--target-host".into(),
