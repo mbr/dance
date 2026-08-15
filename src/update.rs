@@ -8,7 +8,7 @@ use std::{
 use futures::future::join_all;
 use indicatif::ProgressBar;
 
-use crate::{error::Error, process::run};
+use crate::{error::Error, logs::RunLog, process::run};
 
 /// Contains the failures from a group of flake updates.
 #[derive(Default)]
@@ -35,9 +35,13 @@ impl UpdateOutcome {
 async fn flake(
     path: PathBuf,
     host_count: usize,
+    logs: &RunLog,
     progress: &ProgressBar,
 ) -> (PathBuf, Result<(), Error>) {
+    let label = format!("update-{}", path.display());
     let result = run(
+        logs,
+        &label,
         "nix",
         &[
             "flake".into(),
@@ -56,11 +60,15 @@ async fn flake(
 }
 
 /// Updates distinct flakes concurrently and collects their failures.
-pub(crate) async fn flakes(flakes: Vec<(PathBuf, usize)>, progress: &ProgressBar) -> UpdateOutcome {
+pub(crate) async fn flakes(
+    flakes: Vec<(PathBuf, usize)>,
+    logs: &RunLog,
+    progress: &ProgressBar,
+) -> UpdateOutcome {
     let results = join_all(
         flakes
             .into_iter()
-            .map(|(path, host_count)| flake(path, host_count, progress)),
+            .map(|(path, host_count)| flake(path, host_count, logs, progress)),
     )
     .await;
     let mut outcome = UpdateOutcome::default();

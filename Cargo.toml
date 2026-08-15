@@ -9,6 +9,7 @@ edition = "2024"
 clap = { version = "4.5", features = ["derive", "env"] }
 dialoguer = { version = "0.12", default-features = false }
 display_full_error = "1"
+dirs = "6"
 futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
 indicatif = { version = "0.18", default-features = false, features = ["unicode-width"] }
 indexmap = { version = "2", features = ["serde"] }

@@ -10,6 +10,7 @@ use indicatif::ProgressBar;
 use crate::{
     error::Error,
     inventory::Host,
+    logs::RunLog,
     status::{self, DeploymentPhase},
     store_path::StorePath,
 };
@@ -140,23 +141,31 @@ async fn collect_step<T, E>(
 }
 
 /// Collects the system currently active on one host.
-pub(super) async fn deployed(host: &Host, progress: &ProgressBar) -> Result<StorePath, Error> {
+pub(super) async fn deployed(
+    host: &Host,
+    logs: &RunLog,
+    progress: &ProgressBar,
+) -> Result<StorePath, Error> {
     collect_step(
         progress,
         host.id(),
         "remote",
-        host.deployed_store_path(progress),
+        host.deployed_store_path("review", logs, progress),
     )
     .await
 }
 
 /// Collects the system expected from one host's local configuration.
-pub(super) async fn expected(host: &Host, progress: &ProgressBar) -> Result<StorePath, Error> {
+pub(super) async fn expected(
+    host: &Host,
+    logs: &RunLog,
+    progress: &ProgressBar,
+) -> Result<StorePath, Error> {
     collect_step(
         progress,
         host.id(),
         "local",
-        host.expected_store_path(progress),
+        host.expected_store_path(logs, progress),
     )
     .await
 }
@@ -186,17 +195,24 @@ pub(super) fn review(host: Host, deployed: StorePath, expected: StorePath) -> Re
 }
 
 /// Builds, prepares, and activates one outdated host.
-pub(super) async fn activate(reviewed: ReviewedHost, progress: &ProgressBar) -> Result<(), Error> {
+pub(super) async fn activate(
+    reviewed: ReviewedHost,
+    logs: &RunLog,
+    progress: &ProgressBar,
+) -> Result<(), Error> {
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Building);
-    reviewed.host.build(progress).await?;
+    reviewed.host.build(logs, progress).await?;
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Preparing);
     reviewed
         .host
-        .prepare_activation(&reviewed.expected, progress)
+        .prepare_activation(&reviewed.expected, logs, progress)
         .await?;
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Verifying);
-    let current = reviewed.host.deployed_store_path(progress).await?;
+    let current = reviewed
+        .host
+        .deployed_store_path("verify-before", logs, progress)
+        .await?;
     if current != reviewed.deployed {
         return Err(Error::TargetChanged {
             host: reviewed.host.id().to_owned(),
@@ -206,10 +222,16 @@ pub(super) async fn activate(reviewed: ReviewedHost, progress: &ProgressBar) -> 
     }
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Activating);
-    reviewed.host.activate(&reviewed.expected, progress).await?;
+    reviewed
+        .host
+        .activate(&reviewed.expected, logs, progress)
+        .await?;
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Verifying);
-    let current = reviewed.host.deployed_store_path(progress).await?;
+    let current = reviewed
+        .host
+        .deployed_store_path("verify-after", logs, progress)
+        .await?;
     if current != reviewed.expected {
         return Err(Error::ActivationMismatch {
             host: reviewed.host.id().to_owned(),

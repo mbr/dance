@@ -55,6 +55,43 @@ pub(crate) enum Error {
         #[source]
         source: std::string::FromUtf8Error,
     },
+    /// Indicates that the operating system has no state directory.
+    #[error("could not determine the user state directory")]
+    StateDirectoryUnavailable,
+    /// Indicates that a log directory could not be created.
+    #[error("failed to create log directory `{}`", path.display())]
+    CreateLogDirectory {
+        /// Identifies the directory.
+        path: PathBuf,
+        /// Contains the filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// Indicates that a log file could not be written.
+    #[error("failed to write log `{}`", path.display())]
+    WriteLog {
+        /// Identifies the log file.
+        path: PathBuf,
+        /// Contains the filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// Indicates that a log manifest could not be serialized.
+    #[error("failed to serialize log manifest")]
+    SerializeLogManifest {
+        /// Contains the serialization error.
+        #[source]
+        source: toml::ser::Error,
+    },
+    /// Indicates that a completed log directory could not be removed.
+    #[error("failed to remove log directory `{}`", path.display())]
+    RemoveLogDirectory {
+        /// Identifies the directory.
+        path: PathBuf,
+        /// Contains the filesystem error.
+        #[source]
+        source: io::Error,
+    },
     /// Indicates that an inventory could not be read.
     #[error("failed to read inventory `{}`", path.display())]
     ReadInventory {

@@ -10,12 +10,17 @@ use self::host::{HostRow, ReviewOutcome, ReviewedHost};
 use crate::{
     error::Error,
     inventory::Inventory,
+    logs::RunLog,
     status::{self, ProgressDisplay},
     update::{self, UpdateOutcome},
 };
 
 /// Runs the concurrent deployment workflow.
-pub(crate) async fn deploy(inventory: Inventory, update_flakes: bool) -> Result<(), Error> {
+pub(crate) async fn deploy(
+    inventory: Inventory,
+    update_flakes: bool,
+    logs: &RunLog,
+) -> Result<(), Error> {
     let flakes = inventory.flake_groups();
     let hosts = inventory.into_iter().collect::<Vec<_>>();
     let mut rows = hosts.iter().map(HostRow::collecting).collect::<Vec<_>>();
@@ -24,11 +29,11 @@ pub(crate) async fn deploy(inventory: Inventory, update_flakes: bool) -> Result<
     let deployed = join_all(
         hosts
             .iter()
-            .map(|host| host::deployed(host, &review_progress)),
+            .map(|host| host::deployed(host, logs, &review_progress)),
     );
     let local = async {
         let updates = if update_flakes {
-            update::flakes(flakes, &review_progress).await
+            update::flakes(flakes, logs, &review_progress).await
         } else {
             UpdateOutcome::default()
         };
@@ -37,7 +42,7 @@ pub(crate) async fn deploy(inventory: Inventory, update_flakes: bool) -> Result<
                 host::skip_expected(host, &review_progress);
                 None
             } else {
-                Some(host::expected(host, &review_progress).await)
+                Some(host::expected(host, logs, &review_progress).await)
             }
         }))
         .await;
@@ -96,17 +101,17 @@ pub(crate) async fn deploy(inventory: Inventory, update_flakes: bool) -> Result<
         return first_error.map_or(Ok(()), Err);
     }
 
-    let activation = activate(reviewed).await;
+    let activation = activate(reviewed, logs).await;
     first_error.map_or(activation, Err)
 }
 
 /// Builds, prepares, and activates all reviewed hosts concurrently.
-async fn activate(reviewed: Vec<ReviewedHost>) -> Result<(), Error> {
+async fn activate(reviewed: Vec<ReviewedHost>, logs: &RunLog) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
     let results = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
-            let result = host::activate(host, progress).await;
+            let result = host::activate(host, logs, progress).await;
             if result.is_err() {
                 status::fail(progress);
             }

@@ -44,3 +44,7 @@ dance                     # Review every server
 dance www                 # Review only the www inventory entry
 dance --update www        # Update the production flake during review
 ```
+
+## Logs
+
+Dance keeps command output under `$XDG_STATE_HOME/dance/logs` when a run fails. Use `--logs always` to keep successful runs, `--logs never` to disable logs, or `--logs-dir` to change their location.

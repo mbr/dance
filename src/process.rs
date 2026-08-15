@@ -18,7 +18,7 @@ use tokio::{
 };
 use tokio_stream::wrappers::LinesStream;
 
-use crate::error::Error;
+use crate::{error::Error, logs::RunLog};
 
 /// Limits how often subprocess output changes a progress message.
 const OUTPUT_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -168,10 +168,13 @@ async fn capture_output(
 
 /// Runs a subprocess and captures its standard output.
 pub(crate) async fn run(
+    logs: &RunLog,
+    label: &str,
     program: &str,
     arguments: &[OsString],
     progress: &ProgressBar,
 ) -> Result<String, Error> {
+    let command_log = logs.command(label, program, arguments)?;
     let mut process = Command::new(program);
     process
         .args(arguments)
@@ -179,10 +182,17 @@ pub(crate) async fn run(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let command = format!("{:?}", process.as_std());
-    let mut process = process.spawn().map_err(|source| Error::CommandSpawn {
-        command: command.clone(),
-        source,
-    })?;
+    let mut process = match process.spawn() {
+        Ok(process) => process,
+        Err(source) => {
+            let error = Error::CommandSpawn {
+                command: command.clone(),
+                source,
+            };
+            logs.fail_command(&command_log, &error.to_string())?;
+            return Err(error);
+        }
+    };
     let stdout = process
         .stdout
         .take()
@@ -193,14 +203,29 @@ pub(crate) async fn run(
         .expect("piped standard error should be available");
 
     let (status, output) = tokio::join!(process.wait(), capture_output(stdout, stderr, progress));
-    let status = status.map_err(|source| Error::CommandWait {
-        command: command.clone(),
-        source,
-    })?;
-    let output = output.map_err(|source| Error::CommandOutputRead {
-        command: command.clone(),
-        source,
-    })?;
+    let status = match status {
+        Ok(status) => status,
+        Err(source) => {
+            let error = Error::CommandWait {
+                command: command.clone(),
+                source,
+            };
+            logs.fail_command(&command_log, &error.to_string())?;
+            return Err(error);
+        }
+    };
+    let output = match output {
+        Ok(output) => output,
+        Err(source) => {
+            let error = Error::CommandOutputRead {
+                command: command.clone(),
+                source,
+            };
+            logs.fail_command(&command_log, &error.to_string())?;
+            return Err(error);
+        }
+    };
+    logs.complete_command(&command_log, &output.stdout, &output.stderr, status)?;
     if !status.success() {
         return Err(Error::CommandFailed {
             command,

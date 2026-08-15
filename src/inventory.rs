@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use indicatif::ProgressBar;
 use serde::Deserialize;
 
-use crate::{error::Error, process::run, store_path::StorePath};
+use crate::{error::Error, logs::RunLog, process::run, store_path::StorePath};
 
 /// Contains the hosts managed by Dance.
 #[derive(Deserialize)]
@@ -129,9 +129,14 @@ impl Host {
     /// Reads the system currently activated on the target.
     pub(crate) async fn deployed_store_path(
         &self,
+        phase: &str,
+        logs: &RunLog,
         progress: &ProgressBar,
     ) -> Result<StorePath, Error> {
+        let label = format!("{phase}-{}-remote", self.id);
         let output = run(
+            logs,
+            &label,
             "ssh",
             &[
                 self.ssh_url().into(),
@@ -150,9 +155,13 @@ impl Host {
     /// Evaluates the desired system without building it.
     pub(crate) async fn expected_store_path(
         &self,
+        logs: &RunLog,
         progress: &ProgressBar,
     ) -> Result<StorePath, Error> {
+        let label = format!("review-{}-local", self.id);
         let output = run(
+            logs,
+            &label,
             "nix",
             &["eval".into(), "--raw".into(), self.flake_output().into()],
             progress,
@@ -166,8 +175,11 @@ impl Host {
     }
 
     /// Builds the host configuration in the local Nix store.
-    pub(crate) async fn build(&self, progress: &ProgressBar) -> Result<(), Error> {
+    pub(crate) async fn build(&self, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
+        let label = format!("deploy-{}-build", self.id);
         run(
+            logs,
+            &label,
             "nixos-rebuild",
             &[
                 "build".into(),
@@ -185,9 +197,13 @@ impl Host {
     pub(crate) async fn prepare_activation(
         &self,
         store_path: &StorePath,
+        logs: &RunLog,
         progress: &ProgressBar,
     ) -> Result<(), Error> {
+        let label = format!("deploy-{}-prepare", self.id);
         run(
+            logs,
+            &label,
             "nixos-rebuild",
             &[
                 "dry-activate".into(),
@@ -206,9 +222,13 @@ impl Host {
     pub(crate) async fn activate(
         &self,
         store_path: &StorePath,
+        logs: &RunLog,
         progress: &ProgressBar,
     ) -> Result<(), Error> {
+        let label = format!("deploy-{}-activate", self.id);
         run(
+            logs,
+            &label,
             "nixos-rebuild",
             &[
                 "switch".into(),
