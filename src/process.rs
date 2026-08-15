@@ -22,6 +22,8 @@ use crate::{error::Error, logs::RunLog};
 
 /// Limits how often subprocess output changes a progress message.
 const OUTPUT_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
+/// Limits subprocess diagnostics included in terminal errors.
+const ERROR_OUTPUT_LINES: usize = 20;
 
 /// Contains a line stream whose underlying bytes are retained.
 type CapturedLines<R> = LinesStream<BufReader<CapturingReader<R>>>;
@@ -166,6 +168,23 @@ async fn capture_output(
     })
 }
 
+/// Returns the trailing standard-error lines for concise diagnostics.
+fn error_output(stderr: &[u8]) -> String {
+    let value = String::from_utf8_lossy(stderr);
+    let mut lines = value
+        .lines()
+        .rev()
+        .take(ERROR_OUTPUT_LINES)
+        .collect::<Vec<_>>();
+    lines.reverse();
+    let summary = lines.join("\n");
+    if summary.is_empty() {
+        "no standard error output".to_owned()
+    } else {
+        summary
+    }
+}
+
 /// Runs a subprocess and captures its standard output.
 pub(crate) async fn run(
     logs: &RunLog,
@@ -230,7 +249,7 @@ pub(crate) async fn run(
         return Err(Error::CommandFailed {
             command,
             status,
-            stderr: String::from_utf8_lossy(&output.stderr).trim().to_owned(),
+            stderr: error_output(&output.stderr),
         });
     }
 

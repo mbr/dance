@@ -55,6 +55,7 @@ async fn main() -> ExitCode {
         Ok(logs) => logs,
         Err(error) => {
             eprintln!("error: {}", error.display_full());
+            println!("status: failed");
             return ExitCode::FAILURE;
         }
     };
@@ -66,25 +67,30 @@ async fn main() -> ExitCode {
     let log_directory = logs.finish(error_message.as_deref());
 
     match (result, log_directory) {
-        (Ok(()), Ok(Some(path))) => {
-            println!("logs: {}", path.display());
+        (Ok(()), Ok(path)) => {
+            println!("status: succeeded");
+            if let Some(path) = path {
+                println!("logs: {}", path.display());
+            }
             ExitCode::SUCCESS
         }
-        (Ok(()), Ok(None)) => ExitCode::SUCCESS,
         (Err(error), Ok(path)) => {
             eprintln!("error: {}", error.display_full());
+            println!("status: failed");
             if let Some(path) = path {
-                eprintln!("logs: {}", path.display());
+                println!("logs: {}", path.display());
             }
             ExitCode::FAILURE
         }
         (Ok(()), Err(error)) => {
             eprintln!("error: {}", error.display_full());
+            println!("status: failed");
             ExitCode::FAILURE
         }
         (Err(workflow), Err(logs)) => {
             eprintln!("error: {}", workflow.display_full());
             eprintln!("error: {}", logs.display_full());
+            println!("status: failed");
             ExitCode::FAILURE
         }
     }

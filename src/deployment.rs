@@ -2,6 +2,8 @@
 
 mod host;
 
+use std::io::{self, IsTerminal};
+
 use dialoguer::{Confirm, console::style, theme::ColorfulTheme};
 use futures::future::join_all;
 use tabled::Table;
@@ -51,6 +53,8 @@ pub(crate) async fn deploy(
     let (deployed, (mut updates, expected)) = tokio::join!(deployed, local);
 
     let mut reviewed = Vec::new();
+    let mut up_to_date = 0;
+    let mut failed = 0;
     let mut first_error = updates.take_error();
     for (((row, host), deployed), expected) in
         rows.iter_mut().zip(hosts).zip(deployed).zip(expected)
@@ -62,19 +66,24 @@ pub(crate) async fn deploy(
                 Some(Err(error)) => Err(error),
                 None => {
                     row.fail();
+                    failed += 1;
                     continue;
                 }
             },
         };
 
         match outcome {
-            Ok(ReviewOutcome::UpToDate(host_row)) => *row = host_row,
+            Ok(ReviewOutcome::UpToDate(host_row)) => {
+                *row = host_row;
+                up_to_date += 1;
+            }
             Ok(ReviewOutcome::OutOfDate(host_row, host)) => {
                 *row = host_row;
                 reviewed.push(*host);
             }
             Err(error) => {
                 row.fail();
+                failed += 1;
                 first_error.get_or_insert(error);
             }
         }
@@ -83,7 +92,14 @@ pub(crate) async fn deploy(
     review_progress.finish_and_clear();
 
     rows.sort_by_key(HostRow::needs_activation);
-    println!("{}", Table::new(rows));
+    if io::stdout().is_terminal() {
+        println!("{}", Table::new(rows));
+    } else {
+        println!(
+            "review: {up_to_date} up to date, {} out of date, {failed} failed",
+            reviewed.len()
+        );
+    }
     if reviewed.is_empty() {
         return first_error.map_or(Ok(()), Err);
     }
@@ -119,6 +135,11 @@ async fn activate(reviewed: Vec<ReviewedHost>, logs: &RunLog) -> Result<(), Erro
         },
     ))
     .await;
+    let failed = results.iter().filter(|result| result.is_err()).count();
+    println!(
+        "deployment: {} activated, {failed} failed",
+        results.len() - failed
+    );
 
     results.into_iter().find(Result::is_err).unwrap_or(Ok(()))
 }
