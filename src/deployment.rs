@@ -27,6 +27,10 @@ pub(crate) struct DeployOptions {
     pub(crate) update_flakes: bool,
     /// Selects whether interactive approval has been bypassed.
     pub(crate) approved: bool,
+    /// Selects whether configured verifier outputs are skipped.
+    pub(crate) skip_verifier: bool,
+    /// Selects whether failed deployments restore their reviewed systems.
+    pub(crate) rollback: bool,
     /// Selects post-deployment cleanup and generation retention.
     pub(crate) keep_generations: Option<NonZeroU32>,
 }
@@ -67,7 +71,14 @@ pub(crate) async fn deploy(
         return first_error.map_or(Ok(()), Err);
     }
 
-    let activation = activate(outdated, options.keep_generations, logs).await;
+    let activation = activate(
+        outdated,
+        options.keep_generations,
+        !options.skip_verifier,
+        options.rollback,
+        logs,
+    )
+    .await;
     first_error.map_or(activation, Err)
 }
 
@@ -181,13 +192,23 @@ fn confirm() -> Result<bool, Error> {
 async fn activate(
     reviewed: Vec<ReviewedHost>,
     keep_generations: Option<NonZeroU32>,
+    include_verifier: bool,
+    rollback: bool,
     logs: &RunLog,
 ) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
     let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
-            let outcome = host::activate(host, keep_generations, logs, progress).await;
+            let outcome = host::activate(
+                host,
+                keep_generations,
+                include_verifier,
+                rollback,
+                logs,
+                progress,
+            )
+            .await;
             if !matches!(&outcome, ActivationOutcome::Activated) {
                 status::fail(progress);
             }
@@ -198,6 +219,9 @@ async fn activate(
 
     let mut activated = 0;
     let mut failed = 0;
+    let mut verification_failed = 0;
+    let mut rolled_back = 0;
+    let mut rollback_pending = 0;
     let mut cleanup_failed = 0;
     let mut first_error = None;
     for outcome in outcomes {
@@ -207,6 +231,19 @@ async fn activate(
                 failed += 1;
                 first_error.get_or_insert(error);
             }
+            ActivationOutcome::VerificationFailed(error) => {
+                activated += 1;
+                verification_failed += 1;
+                first_error.get_or_insert(error);
+            }
+            ActivationOutcome::RolledBack(error) => {
+                rolled_back += 1;
+                first_error.get_or_insert(error);
+            }
+            ActivationOutcome::RollbackPending(error) => {
+                rollback_pending += 1;
+                first_error.get_or_insert(error);
+            }
             ActivationOutcome::CleanupFailed(error) => {
                 activated += 1;
                 cleanup_failed += 1;
@@ -214,13 +251,20 @@ async fn activate(
             }
         }
     }
-    if cleanup_failed == 0 {
-        println!("deployment: {activated} activated, {failed} failed");
-    } else {
-        println!(
-            "deployment: {activated} activated, {failed} failed, {cleanup_failed} cleanup failed"
-        );
+    let mut summary = format!("deployment: {activated} activated, {failed} failed");
+    if verification_failed != 0 {
+        summary.push_str(&format!(", {verification_failed} verification failed"));
     }
+    if rolled_back != 0 {
+        summary.push_str(&format!(", {rolled_back} rolled back"));
+    }
+    if rollback_pending != 0 {
+        summary.push_str(&format!(", {rollback_pending} rollback pending"));
+    }
+    if cleanup_failed != 0 {
+        summary.push_str(&format!(", {cleanup_failed} cleanup failed"));
+    }
+    println!("{summary}");
 
     first_error.map_or(Ok(()), Err)
 }

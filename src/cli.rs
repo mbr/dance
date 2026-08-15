@@ -64,6 +64,12 @@ pub(crate) struct DeployArgs {
     /// Deploys without requesting confirmation.
     #[arg(short, long)]
     pub(crate) yes: bool,
+    /// Skips configured flake verifiers.
+    #[arg(long)]
+    pub(crate) skip_verifier: bool,
+    /// Leaves a failed activation in place instead of rolling it back.
+    #[arg(long)]
+    pub(crate) no_rollback: bool,
     /// Retains this many system generations after deployment.
     #[arg(long, default_value = "2")]
     pub(crate) keep_generations: NonZeroU32,

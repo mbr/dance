@@ -10,7 +10,7 @@ use indicatif::ProgressBar;
 
 use crate::{
     error::Error,
-    inventory::Host,
+    inventory::{Host, RollbackWatchdog},
     logs::RunLog,
     status::{self, DeploymentPhase},
     store_path::StorePath,
@@ -112,6 +112,12 @@ pub(super) enum ActivationOutcome {
     Activated,
     /// The host could not be activated.
     ActivationFailed(Error),
+    /// The host activated but its configured verifier failed.
+    VerificationFailed(Error),
+    /// The host restored its reviewed system after a deployment failure.
+    RolledBack(Error),
+    /// Rollback remained incomplete while the target watchdog stayed armed.
+    RollbackPending(Error),
     /// The host was activated but could not be cleaned.
     CleanupFailed(Error),
 }
@@ -205,74 +211,199 @@ pub(super) fn review(host: Host, deployed: StorePath, expected: StorePath) -> Re
     )
 }
 
-/// Builds, prepares, activates, and verifies one outdated host.
-async fn switch_system(
-    reviewed: ReviewedHost,
+/// Restores the reviewed system after a post-watchdog failure.
+async fn rollback(
+    reviewed: &ReviewedHost,
+    watchdogs: &[RollbackWatchdog],
+    trigger: Error,
     logs: &RunLog,
     progress: &ProgressBar,
-) -> Result<Host, Error> {
+) -> ActivationOutcome {
+    status::set_phase(progress, reviewed.host.id(), DeploymentPhase::RollingBack);
+    match reviewed
+        .host
+        .rollback(&reviewed.deployed, watchdogs, logs, progress)
+        .await
+    {
+        Ok(()) => ActivationOutcome::RolledBack(trigger),
+        Err(rollback) => ActivationOutcome::RollbackPending(Error::RollbackIncomplete {
+            host: reviewed.host.id().to_owned(),
+            trigger: Box::new(trigger),
+            rollback: Box::new(rollback),
+        }),
+    }
+}
+
+/// Activates one host and performs configured verification and cleanup.
+pub(super) async fn activate(
+    reviewed: ReviewedHost,
+    keep_generations: Option<NonZeroU32>,
+    include_verifier: bool,
+    rollback_enabled: bool,
+    logs: &RunLog,
+    progress: &ProgressBar,
+) -> ActivationOutcome {
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Building);
-    reviewed.host.build(logs, progress).await?;
+    let verifier = if include_verifier {
+        match reviewed.host.verifier(logs, progress).await {
+            Ok(verifier) => verifier,
+            Err(error) => return ActivationOutcome::ActivationFailed(error),
+        }
+    } else {
+        None
+    };
+
+    if let Err(error) = reviewed.host.build(verifier.as_ref(), logs, progress).await {
+        return ActivationOutcome::ActivationFailed(error);
+    }
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Preparing);
-    reviewed
+    if let Err(error) = reviewed
         .host
         .prepare_activation(&reviewed.expected, logs, progress)
-        .await?;
+        .await
+    {
+        return ActivationOutcome::ActivationFailed(error);
+    }
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Verifying);
-    let current = reviewed
+    let current = match reviewed
         .host
         .deployed_store_path("verify-before", logs, progress)
-        .await?;
+        .await
+    {
+        Ok(current) => current,
+        Err(error) => return ActivationOutcome::ActivationFailed(error),
+    };
     if current != reviewed.deployed {
-        return Err(Error::TargetChanged {
+        return ActivationOutcome::ActivationFailed(Error::TargetChanged {
             host: reviewed.host.id().to_owned(),
             reviewed: reviewed.deployed,
             current,
         });
     }
 
-    status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Activating);
-    reviewed
-        .host
-        .activate(&reviewed.expected, logs, progress)
-        .await?;
-
-    status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Verifying);
-    let current = reviewed
-        .host
-        .deployed_store_path("verify-after", logs, progress)
-        .await?;
-    if current != reviewed.expected {
-        return Err(Error::ActivationMismatch {
-            host: reviewed.host.id().to_owned(),
-            expected: reviewed.expected,
-            current,
-        });
+    let mut watchdogs = Vec::new();
+    if rollback_enabled {
+        status::set_phase(
+            progress,
+            reviewed.host.id(),
+            DeploymentPhase::ArmingRollback,
+        );
+        match reviewed
+            .host
+            .arm_rollback(&reviewed.deployed, false, logs, progress)
+            .await
+        {
+            Ok(watchdog) => watchdogs.push(watchdog),
+            Err(error) => return ActivationOutcome::ActivationFailed(error),
+        }
     }
 
-    Ok(reviewed.host)
-}
+    status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Activating);
+    if let Err(error) = reviewed
+        .host
+        .activate(&reviewed.expected, logs, progress)
+        .await
+    {
+        return if rollback_enabled {
+            rollback(&reviewed, &watchdogs, error, logs, progress).await
+        } else {
+            ActivationOutcome::ActivationFailed(error)
+        };
+    }
 
-/// Activates one host and performs configured post-deployment cleanup.
-pub(super) async fn activate(
-    reviewed: ReviewedHost,
-    keep_generations: Option<NonZeroU32>,
-    logs: &RunLog,
-    progress: &ProgressBar,
-) -> ActivationOutcome {
-    let host = match switch_system(reviewed, logs, progress).await {
-        Ok(host) => host,
-        Err(error) => return ActivationOutcome::ActivationFailed(error),
+    if rollback_enabled {
+        status::set_phase(
+            progress,
+            reviewed.host.id(),
+            DeploymentPhase::ArmingRollback,
+        );
+        let verification = match reviewed
+            .host
+            .arm_rollback(&reviewed.deployed, true, logs, progress)
+            .await
+        {
+            Ok(watchdog) => watchdog,
+            Err(error) => return rollback(&reviewed, &watchdogs, error, logs, progress).await,
+        };
+        watchdogs.push(verification);
+        if let Err(error) = reviewed
+            .host
+            .disarm_rollback(&watchdogs[0], logs, progress)
+            .await
+        {
+            return rollback(&reviewed, &watchdogs, error, logs, progress).await;
+        }
+        watchdogs.remove(0);
+    }
+
+    status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Verifying);
+    let current = match reviewed
+        .host
+        .deployed_store_path("verify-after", logs, progress)
+        .await
+    {
+        Ok(current) => current,
+        Err(error) => {
+            return if rollback_enabled {
+                rollback(&reviewed, &watchdogs, error, logs, progress).await
+            } else {
+                ActivationOutcome::ActivationFailed(error)
+            };
+        }
     };
+    if current != reviewed.expected {
+        let error = Error::ActivationMismatch {
+            host: reviewed.host.id().to_owned(),
+            expected: reviewed.expected.clone(),
+            current,
+        };
+        return if rollback_enabled {
+            rollback(&reviewed, &watchdogs, error, logs, progress).await
+        } else {
+            ActivationOutcome::ActivationFailed(error)
+        };
+    }
+
+    if let Some(verifier) = &verifier {
+        status::set_phase(
+            progress,
+            reviewed.host.id(),
+            DeploymentPhase::RunningVerifier,
+        );
+        if let Err(error) = reviewed.host.verify(verifier, logs, progress).await {
+            return if rollback_enabled {
+                rollback(&reviewed, &watchdogs, error, logs, progress).await
+            } else {
+                ActivationOutcome::VerificationFailed(error)
+            };
+        }
+    }
+
+    if let Some(watchdog) = watchdogs.first()
+        && let Err(error) = reviewed
+            .host
+            .disarm_rollback(watchdog, logs, progress)
+            .await
+    {
+        return rollback(&reviewed, &watchdogs, error, logs, progress).await;
+    }
 
     if let Some(keep_generations) = keep_generations {
-        status::set_phase(progress, host.id(), DeploymentPhase::CollectingGarbage);
-        if let Err(error) = host.collect_garbage(keep_generations, logs, progress).await {
+        status::set_phase(
+            progress,
+            reviewed.host.id(),
+            DeploymentPhase::CollectingGarbage,
+        );
+        if let Err(error) = reviewed
+            .host
+            .collect_garbage(keep_generations, logs, progress)
+            .await
+        {
             return ActivationOutcome::CleanupFailed(error);
         }
     }
 
-    status::finish(progress, host.id());
+    status::finish(progress, reviewed.host.id());
     ActivationOutcome::Activated
 }

@@ -46,6 +46,14 @@ pub(crate) enum Error {
         /// Contains standard error from the command.
         stderr: String,
     },
+    /// Indicates that a command exceeded its execution deadline.
+    #[error("`{command}` timed out after {seconds} seconds")]
+    CommandTimedOut {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the configured deadline in seconds.
+        seconds: u64,
+    },
     /// Indicates that command output was not UTF-8.
     #[error("`{command}` returned non-UTF-8 output")]
     CommandOutput {
@@ -122,6 +130,24 @@ pub(crate) enum Error {
         /// Identifies the repeatedly selected inventory entry.
         id: String,
     },
+    /// Indicates that flake metadata was malformed.
+    #[error("failed to parse metadata for flake `{}`", path.display())]
+    ParseFlakeMetadata {
+        /// Identifies the flake.
+        path: PathBuf,
+        /// Contains the JSON decoding error.
+        #[source]
+        source: serde_json::Error,
+    },
+    /// Indicates that verifier metadata was malformed.
+    #[error("failed to parse verifier metadata for host `{host}`")]
+    ParseVerifier {
+        /// Identifies the inventory host.
+        host: String,
+        /// Contains the JSON decoding error.
+        #[source]
+        source: serde_json::Error,
+    },
     /// Indicates that a command did not return a Nix store path.
     #[error("invalid Nix store path `{path}`")]
     InvalidStorePath {
@@ -150,6 +176,26 @@ pub(crate) enum Error {
         expected: StorePath,
         /// Identifies the system observed after activation.
         current: StorePath,
+    },
+    /// Indicates that rollback did not restore the reviewed system.
+    #[error("host `{host}` rolled back to {current}, expected {expected}")]
+    RollbackMismatch {
+        /// Identifies the inventory host.
+        host: String,
+        /// Identifies the reviewed system.
+        expected: StorePath,
+        /// Identifies the system observed after rollback.
+        current: StorePath,
+    },
+    /// Indicates that rollback did not complete while its watchdog remained armed.
+    #[error("rollback of host `{host}` remains incomplete after {trigger}: {rollback}")]
+    RollbackIncomplete {
+        /// Identifies the inventory host.
+        host: String,
+        /// Contains the deployment failure that initiated rollback.
+        trigger: Box<Error>,
+        /// Contains the immediate rollback failure.
+        rollback: Box<Error>,
     },
     /// Indicates that unattended deployment was not explicitly approved.
     #[error("deployment requires `--yes` without a terminal")]

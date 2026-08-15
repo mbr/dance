@@ -7,7 +7,9 @@ At its core, Dance takes servers defined in local Nix flakes and deploys them ov
 - An inventory keeps short server IDs and SSH addresses in one place.
 - Review and deployment run in parallel across multiple servers.
 - `--update` updates the inputs of all selected flakes during review.
-- Systems are built locally; servers fetch available substitutes and receive the remaining paths over SSH.
+- Systems and optional verifiers are built locally; servers fetch available substitutes and receive the remaining system paths over SSH.
+- Flake verifiers can check a deployment from the outside or inspect it over SSH.
+- A target-side rollback watchdog restores the previous system when activation or verification fails.
 - No separate deployment state is kept: Dance checks `/run/current-system` to determine whether an update is needed.
 
 ## Usage
@@ -42,19 +44,38 @@ To deploy outdated systems, run:
 
 ```console
 dance deploy
-dance deploy www                # Deploy only the www inventory entry
-dance deploy --update www       # Update during review, then deploy
-dance deploy --yes www          # Deploy without confirmation
-dance deploy --no-gc www        # Skip post-deployment cleanup
+dance deploy www          # Deploy only the www inventory entry
+dance deploy --update www # Update its flake before deploying
 ```
 
-Dance asks for confirmation, builds locally, dry-activates, and verifies each target before and after switching. A deployment is roughly equivalent to:
+Dance asks for confirmation, builds the system and verifier together, dry-activates, and verifies each target. Failed activation or verification rolls back through a target-side watchdog.
+
+A deployment is roughly equivalent to:
 
 ```console
 nixos-rebuild switch --use-substitutes --flake ../production#web-server --target-host root@www.example.com
 ```
 
-After a deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup.
+After a verified deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup. Failed or rolled-back deployments skip cleanup.
+
+## Verification
+
+A flake can optionally provide a runnable verifier with the same key as its NixOS configuration:
+
+```nix
+danceVerifiers.${system}.web-server = pkgs.writeShellApplication {
+  name = "verify-web-server";
+  runtimeInputs = [ pkgs.hurl ];
+  text = ''
+    hurl --test <<'EOF'
+    GET https://www.example.com/
+    HTTP 200
+    EOF
+  '';
+};
+```
+
+Dance runs the verifier on the deployment machine with `DANCE_HOST_ID` and `DANCE_SSH_TARGET` in its environment. The verifier can use the latter for internal checks such as `ssh "$DANCE_SSH_TARGET" systemctl is-active caddy.service`.
 
 ## Logs
 

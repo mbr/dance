@@ -14,7 +14,7 @@ const NIX_BASE32: &str = "0123456789abcdfghijklmnpqrsvwxyz";
 const SHORT_HASH_LENGTH: usize = 8;
 
 /// Identifies a path in a Nix store.
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) struct StorePath {
     /// Retains the complete store path for identity comparisons.
     path: PathBuf,

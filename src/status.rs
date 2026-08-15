@@ -27,8 +27,14 @@ pub(crate) enum DeploymentPhase {
     Preparing,
     /// Checks the target before or after activation.
     Verifying,
+    /// Arms a target-side rollback watchdog.
+    ArmingRollback,
     /// Switches the target to the desired system.
     Activating,
+    /// Runs the configured verifier.
+    RunningVerifier,
+    /// Restores the reviewed system.
+    RollingBack,
     /// Prunes old generations and unreachable store paths.
     CollectingGarbage,
 }
@@ -40,7 +46,10 @@ impl DeploymentPhase {
             Self::Building => "building",
             Self::Preparing => "preparing",
             Self::Verifying => "verifying target",
+            Self::ArmingRollback => "arming rollback",
             Self::Activating => "activating",
+            Self::RunningVerifier => "running verifier",
+            Self::RollingBack => "rolling back",
             Self::CollectingGarbage => "collecting garbage",
         }
     }
@@ -51,8 +60,9 @@ impl DeploymentPhase {
         match self {
             Self::Building => style.blue(),
             Self::Preparing => style.cyan(),
-            Self::Verifying => style.yellow(),
+            Self::Verifying | Self::ArmingRollback | Self::RunningVerifier => style.yellow(),
             Self::Activating => style.magenta(),
+            Self::RollingBack => style.red(),
             Self::CollectingGarbage => style.yellow(),
         }
     }

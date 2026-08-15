@@ -212,9 +212,53 @@ pub(crate) async fn run_status(
     arguments: &[OsString],
     progress: &ProgressBar,
 ) -> Result<(), Error> {
-    run(logs, label, program, arguments, progress)
+    run_command(logs, label, program, arguments, &[], None, progress)
         .await
         .map(drop)
+}
+
+/// Runs a bounded subprocess without returning its standard output.
+pub(crate) async fn run_status_bounded(
+    logs: &RunLog,
+    label: &str,
+    program: &str,
+    arguments: &[OsString],
+    environment: &[(&str, OsString)],
+    timeout: Duration,
+    progress: &ProgressBar,
+) -> Result<(), Error> {
+    run_command(
+        logs,
+        label,
+        program,
+        arguments,
+        environment,
+        Some(timeout),
+        progress,
+    )
+    .await
+    .map(drop)
+}
+
+/// Runs a bounded subprocess and captures its standard output.
+pub(crate) async fn run_bounded(
+    logs: &RunLog,
+    label: &str,
+    program: &str,
+    arguments: &[OsString],
+    timeout: Duration,
+    progress: &ProgressBar,
+) -> Result<String, Error> {
+    run_command(
+        logs,
+        label,
+        program,
+        arguments,
+        &[],
+        Some(timeout),
+        progress,
+    )
+    .await
 }
 
 /// Runs a subprocess and captures its standard output.
@@ -225,11 +269,25 @@ pub(crate) async fn run(
     arguments: &[OsString],
     progress: &ProgressBar,
 ) -> Result<String, Error> {
+    run_command(logs, label, program, arguments, &[], None, progress).await
+}
+
+/// Runs one configured subprocess and captures its standard output.
+async fn run_command(
+    logs: &RunLog,
+    label: &str,
+    program: &str,
+    arguments: &[OsString],
+    environment: &[(&str, OsString)],
+    timeout: Option<Duration>,
+    progress: &ProgressBar,
+) -> Result<String, Error> {
     let mut command_log = logs.command(label, program, arguments)?;
     let (stdout_log, stderr_log) = command_log.take_outputs();
     let mut process = Command::new(program);
     process
         .args(arguments)
+        .envs(environment.iter().cloned())
         .kill_on_drop(true)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -254,10 +312,26 @@ pub(crate) async fn run(
         .take()
         .expect("piped standard error should be available");
 
-    let (status, output) = tokio::join!(
-        process.wait(),
-        capture_output(stdout, stderr, stdout_log, stderr_log, &command, progress,)
-    );
+    let completion = async {
+        tokio::join!(
+            process.wait(),
+            capture_output(stdout, stderr, stdout_log, stderr_log, &command, progress,)
+        )
+    };
+    let (status, output) = match timeout {
+        Some(limit) => match time::timeout(limit, completion).await {
+            Ok(completion) => completion,
+            Err(_elapsed) => {
+                let error = Error::CommandTimedOut {
+                    command: command.clone(),
+                    seconds: limit.as_secs(),
+                };
+                command_log.fail(&error.to_string())?;
+                return Err(error);
+            }
+        },
+        None => completion.await,
+    };
     let status = match status {
         Ok(status) => status,
         Err(source) => {
@@ -290,12 +364,16 @@ pub(crate) async fn run(
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use std::{ffi::OsString, path::Path, time::Duration};
 
     use indicatif::ProgressBar;
     use tokio::{io::AsyncWriteExt, time};
 
-    use super::{OUTPUT_REFRESH_INTERVAL, capture_output};
+    use super::{OUTPUT_REFRESH_INTERVAL, capture_output, run_status_bounded};
+    use crate::{
+        error::Error,
+        logs::{LogMode, RunLog},
+    };
 
     /// Checks that merged lines are coalesced without mixing captured streams.
     #[tokio::test]
@@ -323,5 +401,31 @@ mod tests {
         assert_eq!(output.stdout, b"result");
         assert_eq!(output.stderr, b"building\n");
         assert_eq!(progress.message(), "result");
+    }
+
+    /// Checks that bounded subprocesses are terminated and reported distinctly.
+    #[tokio::test]
+    async fn bounded_commands_report_timeouts() {
+        let logs = RunLog::start(
+            LogMode::Never,
+            None,
+            Path::new("timeout-test-inventory.toml"),
+        )
+        .expect("disabled logs should start");
+        let progress = ProgressBar::hidden();
+        let result = run_status_bounded(
+            &logs,
+            "timeout",
+            "sh",
+            &[OsString::from("-c"), OsString::from("sleep 10")],
+            &[],
+            Duration::from_millis(20),
+            &progress,
+        )
+        .await;
+
+        assert!(matches!(result, Err(Error::CommandTimedOut { .. })));
+        logs.finish(Some("timed out"))
+            .expect("disabled logs should finish");
     }
 }
