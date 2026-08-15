@@ -1,0 +1,73 @@
+//! Command-line interface definitions.
+
+use std::{num::NonZeroU32, path::PathBuf};
+
+use clap::{Args, Parser, Subcommand};
+
+use crate::logs::LogMode;
+
+/// Deploys NixOS hosts from an inventory.
+#[derive(Debug, Parser)]
+#[command(version)]
+pub(crate) struct Cli {
+    /// Selects the host inventory.
+    #[arg(
+        long,
+        env = "DANCE_INVENTORY",
+        default_value = "inventory.toml",
+        global = true
+    )]
+    pub(crate) inventory: PathBuf,
+    /// Selects when command logs are retained.
+    #[arg(
+        long,
+        env = "DANCE_LOGS",
+        value_enum,
+        default_value = "on-error",
+        global = true
+    )]
+    pub(crate) logs: LogMode,
+    /// Overrides the command log directory.
+    #[arg(long, env = "DANCE_LOGS_DIR", global = true)]
+    pub(crate) logs_dir: Option<PathBuf>,
+    /// Selects the operation to perform.
+    #[command(subcommand)]
+    pub(crate) command: Command,
+}
+
+/// Selects a workflow and its valid options.
+#[derive(Debug, Subcommand)]
+pub(crate) enum Command {
+    /// Compares deployed systems with their local configurations.
+    Review(WorkflowArgs),
+    /// Reviews and deploys outdated systems.
+    Deploy(DeployArgs),
+}
+
+/// Configures the review phase shared by each workflow.
+#[derive(Args, Debug)]
+pub(crate) struct WorkflowArgs {
+    /// Updates selected flakes during review.
+    #[arg(long)]
+    pub(crate) update: bool,
+    /// Limits the workflow to these inventory IDs.
+    #[arg(value_name = "ID")]
+    pub(crate) ids: Vec<String>,
+}
+
+/// Configures activation after the shared review phase.
+#[derive(Args, Debug)]
+pub(crate) struct DeployArgs {
+    /// Configures the hosts and inputs to review.
+    #[command(flatten)]
+    pub(crate) workflow: WorkflowArgs,
+    /// Deploys without requesting confirmation.
+    #[arg(short, long)]
+    pub(crate) yes: bool,
+    /// Retains this many system generations after deployment.
+    #[arg(long, default_value = "2")]
+    pub(crate) keep_generations: NonZeroU32,
+    /// Skips post-deployment garbage collection.
+    #[arg(long, conflicts_with = "keep_generations")]
+    pub(crate) no_gc: bool,
+}

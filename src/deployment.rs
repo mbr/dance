@@ -1,4 +1,4 @@
-//! Concurrent deployment coordination.
+//! Concurrent review and deployment coordination.
 
 mod host;
 
@@ -20,56 +20,85 @@ use crate::{
     update::{self, UpdateOutcome},
 };
 
-/// Selects how Dance proceeds after reviewing outdated hosts.
+/// Configures review, approval, and cleanup for a deployment.
 #[derive(Clone, Copy)]
-pub(crate) enum Mode {
-    /// Requests interactive approval.
-    Confirm,
-    /// Deploys without requesting approval.
-    Approved,
-    /// Stops after collecting host information.
-    ReviewOnly,
-}
-
-/// Configures one deployment workflow.
-#[derive(Clone, Copy)]
-pub(crate) struct Options {
+pub(crate) struct DeployOptions {
     /// Selects whether flake inputs are updated during review.
     pub(crate) update_flakes: bool,
-    /// Selects how outdated hosts proceed after review.
-    pub(crate) mode: Mode,
+    /// Selects whether interactive approval has been bypassed.
+    pub(crate) approved: bool,
     /// Selects post-deployment cleanup and generation retention.
     pub(crate) keep_generations: Option<NonZeroU32>,
 }
 
-/// Runs the concurrent deployment workflow.
-pub(crate) async fn deploy(
+/// Contains the actionable hosts and any failure found during review.
+struct ReviewResult {
+    /// Contains hosts whose desired systems differ from their active systems.
+    outdated: Vec<ReviewedHost>,
+    /// Contains the first failure encountered while collecting information.
+    first_error: Option<Error>,
+}
+
+/// Reviews the selected hosts without activating them.
+pub(crate) async fn review(
     inventory: Inventory,
-    options: Options,
+    update_flakes: bool,
     logs: &RunLog,
 ) -> Result<(), Error> {
+    let result = collect(inventory, update_flakes, logs).await?;
+    result.first_error.map_or(Ok(()), Err)
+}
+
+/// Reviews and deploys the selected hosts.
+pub(crate) async fn deploy(
+    inventory: Inventory,
+    options: DeployOptions,
+    logs: &RunLog,
+) -> Result<(), Error> {
+    let ReviewResult {
+        outdated,
+        first_error,
+    } = collect(inventory, options.update_flakes, logs).await?;
+    if outdated.is_empty() {
+        return first_error.map_or(Ok(()), Err);
+    }
+
+    if !options.approved && !confirm()? {
+        return first_error.map_or(Ok(()), Err);
+    }
+
+    let activation = activate(outdated, options.keep_generations, logs).await;
+    first_error.map_or(activation, Err)
+}
+
+/// Collects and displays the active and desired state of selected hosts.
+async fn collect(
+    inventory: Inventory,
+    update_flakes: bool,
+    logs: &RunLog,
+) -> Result<ReviewResult, Error> {
     let flakes = inventory.flake_groups();
     let hosts = inventory.into_iter().collect::<Vec<_>>();
     let mut rows = hosts.iter().map(HostRow::collecting).collect::<Vec<_>>();
-    let review_progress = status::review(hosts.len(), options.update_flakes)?;
+    let progress = status::review(hosts.len(), update_flakes)?;
 
     let deployed = join_all(
         hosts
             .iter()
-            .map(|host| host::deployed(host, logs, &review_progress)),
+            .map(|host| host::deployed(host, logs, &progress)),
     );
     let local = async {
-        let updates = if options.update_flakes {
-            update::flakes(flakes, logs, &review_progress).await
+        let updates = if update_flakes {
+            update::flakes(flakes, logs, &progress).await
         } else {
             UpdateOutcome::default()
         };
         let expected = join_all(hosts.iter().map(|host| async {
             if updates.failed(host.flake_path()) {
-                host::skip_expected(host, &review_progress);
+                host::skip_expected(host, &progress);
                 None
             } else {
-                Some(host::expected(host, logs, &review_progress).await)
+                Some(host::expected(host, logs, &progress).await)
             }
         }))
         .await;
@@ -77,7 +106,7 @@ pub(crate) async fn deploy(
     };
     let (deployed, (mut updates, expected)) = tokio::join!(deployed, local);
 
-    let mut reviewed = Vec::new();
+    let mut outdated = Vec::new();
     let mut up_to_date = 0;
     let mut failed = 0;
     let mut first_error = updates.take_error();
@@ -104,7 +133,7 @@ pub(crate) async fn deploy(
             }
             Ok(ReviewOutcome::OutOfDate(host_row, host)) => {
                 *row = host_row;
-                reviewed.push(*host);
+                outdated.push(*host);
             }
             Err(error) => {
                 row.fail();
@@ -114,47 +143,38 @@ pub(crate) async fn deploy(
         }
     }
 
-    review_progress.finish_and_clear();
-
+    progress.finish_and_clear();
     rows.sort_by_key(HostRow::needs_activation);
     if io::stdout().is_terminal() {
         println!("{}", Table::new(rows));
     } else {
         println!(
             "review: {up_to_date} up to date, {} out of date, {failed} failed",
-            reviewed.len()
+            outdated.len()
         );
     }
-    if reviewed.is_empty() {
-        return first_error.map_or(Ok(()), Err);
-    }
-    if matches!(options.mode, Mode::ReviewOnly) {
-        println!("deployment: skipped");
-        return first_error.map_or(Ok(()), Err);
-    }
-    if matches!(options.mode, Mode::Confirm)
-        && !(io::stdin().is_terminal() && io::stderr().is_terminal())
-    {
+
+    Ok(ReviewResult {
+        outdated,
+        first_error,
+    })
+}
+
+/// Requests approval for an interactive deployment.
+fn confirm() -> Result<bool, Error> {
+    if !(io::stdin().is_terminal() && io::stderr().is_terminal()) {
         return Err(Error::ConfirmationRequired);
     }
 
-    if matches!(options.mode, Mode::Confirm) {
-        let theme = ColorfulTheme {
-            success_prefix: style(">".to_owned()).for_stderr().green(),
-            ..ColorfulTheme::default()
-        };
-        let approved = Confirm::with_theme(&theme)
-            .with_prompt("Deploy the outdated systems?")
-            .default(false)
-            .interact()
-            .map_err(|source| Error::Confirmation { source })?;
-        if !approved {
-            return first_error.map_or(Ok(()), Err);
-        }
-    }
-
-    let activation = activate(reviewed, options.keep_generations, logs).await;
-    first_error.map_or(activation, Err)
+    let theme = ColorfulTheme {
+        success_prefix: style(">".to_owned()).for_stderr().green(),
+        ..ColorfulTheme::default()
+    };
+    Confirm::with_theme(&theme)
+        .with_prompt("Deploy the outdated systems?")
+        .default(false)
+        .interact()
+        .map_err(|source| Error::Confirmation { source })
 }
 
 /// Builds, prepares, and activates all reviewed hosts concurrently.
