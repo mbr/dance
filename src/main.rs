@@ -25,15 +25,15 @@ struct Cli {
     /// Updates selected flakes before reviewing hosts.
     #[arg(long)]
     update: bool,
-    /// Limits deployment to these inventory host names.
-    #[arg(value_name = "HOST")]
-    hosts: Vec<String>,
+    /// Limits deployment to these inventory IDs.
+    #[arg(value_name = "ID")]
+    ids: Vec<String>,
 }
 
 /// Runs the deployment workflow.
 async fn run() -> Result<(), Error> {
     let cli = Cli::parse();
-    let inventory = Inventory::load(&cli.inventory)?.select(&cli.hosts)?;
+    let inventory = Inventory::load(&cli.inventory)?.select(&cli.ids)?;
     if cli.update {
         update::flakes(&inventory).await?;
     }

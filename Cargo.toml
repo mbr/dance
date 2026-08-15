@@ -11,9 +11,10 @@ dialoguer = { version = "0.12", default-features = false }
 display_full_error = "1"
 futures = { version = "0.3", default-features = false, features = ["async-await", "std"] }
 indicatif = { version = "0.18", default-features = false, features = ["unicode-width"] }
+indexmap = { version = "2", features = ["serde"] }
 serde = { version = "1", features = ["derive"] }
 tabled = "0.21"
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "process", "rt-multi-thread", "time"] }
 tokio-stream = { version = "0.1", features = ["io-util"] }
-toml = "0.9"
+toml = { version = "0.9", features = ["preserve_order"] }

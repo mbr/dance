@@ -69,7 +69,7 @@ pub(crate) async fn deploy(inventory: Inventory) -> Result<(), Error> {
 /// Builds, prepares, and activates all reviewed hosts concurrently.
 async fn activate(reviewed: Vec<ReviewedHost>) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
-    let progresses = display.hosts(reviewed.iter().map(ReviewedHost::name));
+    let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
     let results = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
             let result = host::activate(host, progress).await;

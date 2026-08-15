@@ -73,23 +73,17 @@ pub(crate) enum Error {
         #[source]
         source: toml::de::Error,
     },
-    /// Indicates that an inventory defines the same host name more than once.
-    #[error("inventory contains duplicate host `{host}`")]
-    DuplicateInventoryHost {
-        /// Identifies the duplicated inventory host.
-        host: String,
+    /// Indicates that a requested ID is not in the inventory.
+    #[error("ID `{id}` is not in the inventory")]
+    UnknownId {
+        /// Identifies the requested inventory entry.
+        id: String,
     },
-    /// Indicates that a requested host is not in the inventory.
-    #[error("host `{host}` is not in the inventory")]
-    UnknownHost {
-        /// Identifies the requested host.
-        host: String,
-    },
-    /// Indicates that a host was requested more than once.
-    #[error("host `{host}` was selected more than once")]
-    DuplicateSelectedHost {
-        /// Identifies the repeatedly selected host.
-        host: String,
+    /// Indicates that an ID was requested more than once.
+    #[error("ID `{id}` was selected more than once")]
+    DuplicateSelectedId {
+        /// Identifies the repeatedly selected inventory entry.
+        id: String,
     },
     /// Indicates that a command did not return a Nix store path.
     #[error("invalid Nix store path `{path}`")]

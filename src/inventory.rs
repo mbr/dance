@@ -6,6 +6,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
+use indexmap::IndexMap;
 use indicatif::ProgressBar;
 use serde::Deserialize;
 
@@ -16,15 +17,15 @@ use crate::{error::Error, process::run, store_path::StorePath};
 #[serde(deny_unknown_fields)]
 pub(crate) struct Inventory {
     /// Defines the managed hosts.
-    hosts: Vec<Host>,
+    hosts: IndexMap<String, Host>,
 }
 
 impl IntoIterator for Inventory {
-    type IntoIter = std::vec::IntoIter<Host>;
+    type IntoIter = indexmap::map::IntoValues<String, Host>;
     type Item = Host;
 
     fn into_iter(self) -> Self::IntoIter {
-        self.hosts.into_iter()
+        self.hosts.into_values()
     }
 }
 
@@ -42,13 +43,13 @@ impl Inventory {
             })?;
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
 
-        for host in &mut inventory.hosts {
+        for (id, host) in &mut inventory.hosts {
+            host.id.clone_from(id);
             if host.flake_path.is_relative() {
                 host.flake_path = directory.join(&host.flake_path);
             }
         }
 
-        inventory.validate()?;
         Ok(inventory)
     }
 
@@ -56,7 +57,7 @@ impl Inventory {
     pub(crate) fn flake_paths(&self) -> Vec<&Path> {
         let mut seen = HashSet::new();
         self.hosts
-            .iter()
+            .values()
             .filter_map(|host| {
                 let path = host.flake_path.as_path();
                 seen.insert(path).then_some(path)
@@ -71,31 +72,18 @@ impl Inventory {
         }
 
         let mut selected = HashSet::new();
-        for name in requested {
-            if !selected.insert(name.as_str()) {
-                return Err(Error::DuplicateSelectedHost { host: name.clone() });
+        for id in requested {
+            if !selected.insert(id.as_str()) {
+                return Err(Error::DuplicateSelectedId { id: id.clone() });
             }
-            if !self.hosts.iter().any(|host| host.name == *name) {
-                return Err(Error::UnknownHost { host: name.clone() });
+            if !self.hosts.contains_key(id) {
+                return Err(Error::UnknownId { id: id.clone() });
             }
         }
 
         self.hosts
-            .retain(|host| selected.contains(host.name.as_str()));
+            .retain(|id, _host| selected.contains(id.as_str()));
         Ok(self)
-    }
-
-    /// Ensures inventory host names are unique.
-    fn validate(&self) -> Result<(), Error> {
-        let mut names = HashSet::new();
-        for host in &self.hosts {
-            if !names.insert(host.name.as_str()) {
-                return Err(Error::DuplicateInventoryHost {
-                    host: host.name.clone(),
-                });
-            }
-        }
-        Ok(())
     }
 }
 
@@ -103,11 +91,9 @@ impl Inventory {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Host {
-    /// Identifies the host in user-facing output.
-    name: String,
-    /// Documents the host's purpose.
-    #[serde(rename = "description")]
-    _description: String,
+    /// Identifies the inventory entry.
+    #[serde(skip)]
+    id: String,
     /// Selects the SSH destination.
     ssh_host: String,
     /// Locates the flake relative to the inventory.
@@ -117,9 +103,9 @@ pub(crate) struct Host {
 }
 
 impl Host {
-    /// Returns the inventory name.
-    pub(crate) fn name(&self) -> &str {
-        &self.name
+    /// Returns the inventory ID.
+    pub(crate) fn id(&self) -> &str {
+        &self.id
     }
 
     /// Returns the display form of the flake selector.
@@ -253,59 +239,80 @@ impl Host {
 mod tests {
     use std::path::{Path, PathBuf};
 
+    use indexmap::IndexMap;
+
     use super::{Host, Inventory};
     use crate::error::Error;
 
     /// Creates a minimal inventory with hosts in the given order.
-    fn inventory(names: &[&str]) -> Inventory {
+    fn inventory(ids: &[&str]) -> Inventory {
         Inventory {
-            hosts: names
+            hosts: ids
                 .iter()
-                .map(|name| Host {
-                    name: (*name).to_owned(),
-                    _description: String::new(),
-                    ssh_host: (*name).to_owned(),
-                    flake_path: PathBuf::from(name),
-                    flake_name: (*name).to_owned(),
+                .map(|id| {
+                    (
+                        (*id).to_owned(),
+                        Host {
+                            id: (*id).to_owned(),
+                            ssh_host: (*id).to_owned(),
+                            flake_path: PathBuf::from(id),
+                            flake_name: (*id).to_owned(),
+                        },
+                    )
                 })
-                .collect(),
+                .collect::<IndexMap<_, _>>(),
         }
     }
 
-    /// Checks selection validation and inventory-order preservation.
+    /// Checks table parsing, selection validation, and inventory order.
     #[test]
-    fn selects_hosts_by_unique_inventory_name() {
+    fn parses_and_selects_hosts_by_unique_inventory_id() {
+        let parsed: Inventory = toml::from_str(
+            r#"
+[hosts.party]
+ssh_host = "party"
+flake_path = "sgflt.net"
+flake_name = "party"
+
+[hosts.www]
+ssh_host = "www"
+flake_path = "www"
+flake_name = "www"
+"#,
+        )
+        .expect("keyed hosts should parse");
+        assert_eq!(
+            parsed.hosts.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["party", "www"]
+        );
+
         let requested = ["party".to_owned(), "www".to_owned()];
         let selected = inventory(&["www", "other", "party"])
             .select(&requested)
             .expect("known hosts should be selected");
-        let names = selected
-            .into_iter()
-            .map(|host| host.name)
-            .collect::<Vec<_>>();
-        assert_eq!(names, ["www", "party"]);
+        let ids = selected.into_iter().map(|host| host.id).collect::<Vec<_>>();
+        assert_eq!(ids, ["www", "party"]);
 
         let mut shared = inventory(&["www", "party", "other"]);
-        shared.hosts[1].flake_path = PathBuf::from("www");
+        shared
+            .hosts
+            .get_index_mut(1)
+            .expect("second host should exist")
+            .1
+            .flake_path = PathBuf::from("www");
         let flakes = shared.flake_paths();
         assert_eq!(flakes, [Path::new("www"), Path::new("other")]);
 
         let unknown = inventory(&["www"]).select(&["party".to_owned()]);
         assert!(matches!(
             unknown,
-            Err(Error::UnknownHost { host }) if host == "party"
+            Err(Error::UnknownId { id }) if id == "party"
         ));
 
         let duplicate = inventory(&["www"]).select(&["www".to_owned(), "www".to_owned()]);
         assert!(matches!(
             duplicate,
-            Err(Error::DuplicateSelectedHost { host }) if host == "www"
-        ));
-
-        let duplicate = inventory(&["www", "www"]).validate();
-        assert!(matches!(
-            duplicate,
-            Err(Error::DuplicateInventoryHost { host }) if host == "www"
+            Err(Error::DuplicateSelectedId { id }) if id == "www"
         ));
     }
 }
