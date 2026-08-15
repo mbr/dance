@@ -12,6 +12,8 @@ const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 /// Defines the layout of the information collection bar.
 const REVIEW_TEMPLATE: &str =
     "{spinner} collecting info [{bar:20.cyan/blue}] {pos}/{len} {msg:.dim}";
+/// Defines the layout of a flake update bar.
+const UPDATE_TEMPLATE: &str = "{spinner} updating {prefix} [{pos}/{len}] {msg:.dim}";
 /// Defines the layout of a host status line.
 const HOST_TEMPLATE: &str = "{spinner} {prefix} {msg}";
 /// Defines the smooth spinner animation and its blank final frame.
@@ -64,6 +66,17 @@ pub(crate) fn review(host_count: usize) -> Result<ProgressBar, Error> {
         .map_err(|source| Error::ProgressStyle { source })?
         .tick_chars(SPINNER_TICKS)
         .progress_chars("=>-");
+    let progress = ProgressBar::new(length).with_style(style);
+    progress.enable_steady_tick(SPINNER_INTERVAL);
+    Ok(progress)
+}
+
+/// Creates a progress bar for updating selected flakes.
+pub(crate) fn update(flake_count: usize) -> Result<ProgressBar, Error> {
+    let length = u64::try_from(flake_count).expect("flake count should fit in u64");
+    let style = ProgressStyle::with_template(UPDATE_TEMPLATE)
+        .map_err(|source| Error::ProgressStyle { source })?
+        .tick_chars(SPINNER_TICKS);
     let progress = ProgressBar::new(length).with_style(style);
     progress.enable_steady_tick(SPINNER_INTERVAL);
     Ok(progress)

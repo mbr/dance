@@ -52,6 +52,18 @@ impl Inventory {
         Ok(inventory)
     }
 
+    /// Returns each selected flake path once in inventory order.
+    pub(crate) fn flake_paths(&self) -> Vec<&Path> {
+        let mut seen = HashSet::new();
+        self.hosts
+            .iter()
+            .filter_map(|host| {
+                let path = host.flake_path.as_path();
+                seen.insert(path).then_some(path)
+            })
+            .collect()
+    }
+
     /// Limits the inventory to explicitly requested hosts.
     pub(crate) fn select(mut self, requested: &[String]) -> Result<Self, Error> {
         if requested.is_empty() {
@@ -239,7 +251,7 @@ impl Host {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
 
     use super::{Host, Inventory};
     use crate::error::Error;
@@ -272,6 +284,11 @@ mod tests {
             .map(|host| host.name)
             .collect::<Vec<_>>();
         assert_eq!(names, ["www", "party"]);
+
+        let mut shared = inventory(&["www", "party", "other"]);
+        shared.hosts[1].flake_path = PathBuf::from("www");
+        let flakes = shared.flake_paths();
+        assert_eq!(flakes, [Path::new("www"), Path::new("other")]);
 
         let unknown = inventory(&["www"]).select(&["party".to_owned()]);
         assert!(matches!(
