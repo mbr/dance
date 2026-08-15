@@ -1,6 +1,7 @@
 //! Inventory parsing and host operations.
 
 use std::{
+    collections::HashSet,
     fs,
     path::{Path, PathBuf},
 };
@@ -47,7 +48,42 @@ impl Inventory {
             }
         }
 
+        inventory.validate()?;
         Ok(inventory)
+    }
+
+    /// Limits the inventory to explicitly requested hosts.
+    pub(crate) fn select(mut self, requested: &[String]) -> Result<Self, Error> {
+        if requested.is_empty() {
+            return Ok(self);
+        }
+
+        let mut selected = HashSet::new();
+        for name in requested {
+            if !selected.insert(name.as_str()) {
+                return Err(Error::DuplicateSelectedHost { host: name.clone() });
+            }
+            if !self.hosts.iter().any(|host| host.name == *name) {
+                return Err(Error::UnknownHost { host: name.clone() });
+            }
+        }
+
+        self.hosts
+            .retain(|host| selected.contains(host.name.as_str()));
+        Ok(self)
+    }
+
+    /// Ensures inventory host names are unique.
+    fn validate(&self) -> Result<(), Error> {
+        let mut names = HashSet::new();
+        for host in &self.hosts {
+            if !names.insert(host.name.as_str()) {
+                return Err(Error::DuplicateInventoryHost {
+                    host: host.name.clone(),
+                });
+            }
+        }
+        Ok(())
     }
 }
 
@@ -198,5 +234,61 @@ impl Host {
     /// Returns the complete flake selector used by `nixos-rebuild`.
     fn flake_selector(&self) -> String {
         format!("{}#{}", self.flake_path.display(), self.flake_name)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use super::{Host, Inventory};
+    use crate::error::Error;
+
+    /// Creates a minimal inventory with hosts in the given order.
+    fn inventory(names: &[&str]) -> Inventory {
+        Inventory {
+            hosts: names
+                .iter()
+                .map(|name| Host {
+                    name: (*name).to_owned(),
+                    _description: String::new(),
+                    ssh_host: (*name).to_owned(),
+                    flake_path: PathBuf::from(name),
+                    flake_name: (*name).to_owned(),
+                })
+                .collect(),
+        }
+    }
+
+    /// Checks selection validation and inventory-order preservation.
+    #[test]
+    fn selects_hosts_by_unique_inventory_name() {
+        let requested = ["party".to_owned(), "www".to_owned()];
+        let selected = inventory(&["www", "other", "party"])
+            .select(&requested)
+            .expect("known hosts should be selected");
+        let names = selected
+            .into_iter()
+            .map(|host| host.name)
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["www", "party"]);
+
+        let unknown = inventory(&["www"]).select(&["party".to_owned()]);
+        assert!(matches!(
+            unknown,
+            Err(Error::UnknownHost { host }) if host == "party"
+        ));
+
+        let duplicate = inventory(&["www"]).select(&["www".to_owned(), "www".to_owned()]);
+        assert!(matches!(
+            duplicate,
+            Err(Error::DuplicateSelectedHost { host }) if host == "www"
+        ));
+
+        let duplicate = inventory(&["www", "www"]).validate();
+        assert!(matches!(
+            duplicate,
+            Err(Error::DuplicateInventoryHost { host }) if host == "www"
+        ));
     }
 }

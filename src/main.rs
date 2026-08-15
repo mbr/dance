@@ -21,12 +21,16 @@ struct Cli {
     /// Selects the host inventory.
     #[arg(long, env = "DANCE_INVENTORY", default_value = "inventory.toml")]
     inventory: PathBuf,
+    /// Limits deployment to these inventory host names.
+    #[arg(value_name = "HOST")]
+    hosts: Vec<String>,
 }
 
 /// Runs the deployment workflow.
 async fn run() -> Result<(), Error> {
     let cli = Cli::parse();
-    deployment::deploy(Inventory::load(&cli.inventory)?).await
+    let inventory = Inventory::load(&cli.inventory)?.select(&cli.hosts)?;
+    deployment::deploy(inventory).await
 }
 
 /// Reports whether the deployment workflow succeeded.
