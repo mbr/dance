@@ -56,16 +56,20 @@ impl DeploymentPhase {
     }
 }
 
+/// Creates the common animated style for a progress display.
+fn spinner_style(template: &str) -> Result<ProgressStyle, Error> {
+    Ok(ProgressStyle::with_template(template)
+        .map_err(|source| Error::ProgressStyle { source })?
+        .tick_chars(SPINNER_TICKS))
+}
+
 /// Creates a progress bar for local and remote host information collection.
 pub(crate) fn review(host_count: usize) -> Result<ProgressBar, Error> {
     let host_count = u64::try_from(host_count).expect("host count should fit in u64");
     let length = host_count
         .checked_mul(2)
         .expect("information collection step count should fit in u64");
-    let style = ProgressStyle::with_template(REVIEW_TEMPLATE)
-        .map_err(|source| Error::ProgressStyle { source })?
-        .tick_chars(SPINNER_TICKS)
-        .progress_chars("=>-");
+    let style = spinner_style(REVIEW_TEMPLATE)?.progress_chars("=>-");
     let progress = ProgressBar::new(length).with_style(style);
     progress.enable_steady_tick(SPINNER_INTERVAL);
     Ok(progress)
@@ -74,9 +78,7 @@ pub(crate) fn review(host_count: usize) -> Result<ProgressBar, Error> {
 /// Creates a progress bar for updating selected flakes.
 pub(crate) fn update(flake_count: usize) -> Result<ProgressBar, Error> {
     let length = u64::try_from(flake_count).expect("flake count should fit in u64");
-    let style = ProgressStyle::with_template(UPDATE_TEMPLATE)
-        .map_err(|source| Error::ProgressStyle { source })?
-        .tick_chars(SPINNER_TICKS);
+    let style = spinner_style(UPDATE_TEMPLATE)?;
     let progress = ProgressBar::new(length).with_style(style);
     progress.enable_steady_tick(SPINNER_INTERVAL);
     Ok(progress)
@@ -109,7 +111,7 @@ pub(crate) fn finish(progress: &ProgressBar, host: &str) {
 
 /// Marks a host deployment as failed while retaining its phase.
 pub(crate) fn fail(progress: &ProgressBar) {
-    let failed = style("failed".to_owned()).for_stderr().red();
+    let failed = style("failed").for_stderr().red();
     progress.finish_with_message(format!("{failed}"));
 }
 
@@ -124,9 +126,7 @@ pub(crate) struct ProgressDisplay {
 impl ProgressDisplay {
     /// Creates a per-host terminal progress display.
     pub(crate) fn new() -> Result<Self, Error> {
-        let style = ProgressStyle::with_template(HOST_TEMPLATE)
-            .map_err(|source| Error::ProgressStyle { source })?
-            .tick_chars(SPINNER_TICKS);
+        let style = spinner_style(HOST_TEMPLATE)?;
         Ok(Self {
             progress: MultiProgress::new(),
             style,

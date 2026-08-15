@@ -1,6 +1,9 @@
 //! Per-host review and activation workflows.
 
-use std::future::Future;
+use std::{
+    fmt::{self, Display, Formatter},
+    future::Future,
+};
 
 use indicatif::ProgressBar;
 
@@ -10,6 +13,30 @@ use crate::{
     status::{self, DeploymentPhase},
     store_path::StorePath,
 };
+
+/// Describes a host's state during deployment review.
+#[derive(Clone, Copy)]
+enum HostStatus {
+    /// Information has not been collected yet.
+    Collecting,
+    /// The deployed and desired systems match.
+    UpToDate,
+    /// The desired system needs to be activated.
+    OutOfDate,
+    /// Information collection failed.
+    Failed,
+}
+
+impl Display for HostStatus {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Collecting => "collecting",
+            Self::UpToDate => "up to date",
+            Self::OutOfDate => "out of date",
+            Self::Failed => "failed",
+        })
+    }
+}
 
 /// Provides a row in the deployment status table.
 #[derive(tabled::Tabled)]
@@ -22,7 +49,7 @@ pub(super) struct HostRow {
     flake: String,
     /// Summarizes the review result.
     #[tabled(rename = "STATUS")]
-    status: &'static str,
+    status: HostStatus,
     /// Displays the store-path transition when deployment is needed.
     #[tabled(rename = "CHANGE")]
     change: String,
@@ -34,22 +61,23 @@ impl HostRow {
         Self {
             host: host.name().to_owned(),
             flake: host.flake(),
-            status: "collecting",
+            status: HostStatus::Collecting,
             change: "-".to_owned(),
         }
     }
 
     /// Creates a row from the deployed and desired systems.
     fn collected(host: &Host, deployed: &StorePath, expected: &StorePath) -> Self {
+        let up_to_date = deployed == expected;
         Self {
             host: host.name().to_owned(),
             flake: host.flake(),
-            status: if deployed == expected {
-                "up to date"
+            status: if up_to_date {
+                HostStatus::UpToDate
             } else {
-                "out of date"
+                HostStatus::OutOfDate
             },
-            change: if deployed == expected {
+            change: if up_to_date {
                 "-".to_owned()
             } else {
                 format!("{} -> {}", deployed.short_hash(), expected.short_hash())
@@ -59,12 +87,12 @@ impl HostRow {
 
     /// Returns whether the host needs activation work.
     pub(super) fn needs_activation(&self) -> bool {
-        self.status == "out of date"
+        matches!(self.status, HostStatus::OutOfDate)
     }
 
     /// Marks an information collection failure.
     pub(super) fn fail(&mut self) {
-        self.status = "failed";
+        self.status = HostStatus::Failed;
     }
 }
 
