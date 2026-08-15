@@ -28,26 +28,33 @@ flake_name = "web-server"
 Running
 
 ```console
-dance
+dance review
 ```
 
-compares the active system on `www.example.com` with the system defined locally. If they differ, Dance asks for confirmation, builds locally, dry-activates, and verifies the target before and after switching. This is roughly equivalent to:
+compares the active system on `www.example.com` with the system defined locally. Pass one or more inventory IDs to limit the review:
+
+```console
+dance review www
+dance review --update www # Update the production flake during review
+```
+
+To deploy outdated systems, run:
+
+```console
+dance deploy
+dance deploy www                # Deploy only the www inventory entry
+dance deploy --update www       # Update during review, then deploy
+dance deploy --yes www          # Deploy without confirmation
+dance deploy --no-gc www        # Skip post-deployment cleanup
+```
+
+Dance asks for confirmation, builds locally, dry-activates, and verifies each target before and after switching. A deployment is roughly equivalent to:
 
 ```console
 nixos-rebuild switch --use-substitutes --flake ../production#web-server --target-host root@www.example.com
 ```
 
 After a deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup.
-
-Other ways to run Dance:
-
-```console
-dance                     # Review every server
-dance www                 # Review only the www inventory entry
-dance --update www        # Update the production flake during review
-dance --update --review-only www # Update and review without deploying
-dance --yes www           # Deploy without confirmation
-```
 
 ## Logs
 

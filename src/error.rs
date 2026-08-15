@@ -152,7 +152,7 @@ pub(crate) enum Error {
         current: StorePath,
     },
     /// Indicates that unattended deployment was not explicitly approved.
-    #[error("deployment requires `--yes` or `--review-only` without a terminal")]
+    #[error("deployment requires `--yes` without a terminal")]
     ConfirmationRequired,
     /// Indicates that deployment confirmation failed.
     #[error("failed to confirm deployment")]

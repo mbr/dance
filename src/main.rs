@@ -11,7 +11,7 @@ mod update;
 
 use std::{num::NonZeroU32, path::PathBuf, process::ExitCode};
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use display_full_error::DisplayFullErrorExt;
 
 use crate::{
@@ -25,49 +25,93 @@ use crate::{
 #[command(version)]
 struct Cli {
     /// Selects the host inventory.
-    #[arg(long, env = "DANCE_INVENTORY", default_value = "inventory.toml")]
+    #[arg(
+        long,
+        env = "DANCE_INVENTORY",
+        default_value = "inventory.toml",
+        global = true
+    )]
     inventory: PathBuf,
-    /// Updates selected flakes during review.
-    #[arg(long)]
-    update: bool,
-    /// Deploys without requesting confirmation.
-    #[arg(short, long, conflicts_with = "review_only")]
-    yes: bool,
-    /// Stops after updating and collecting host information.
-    #[arg(long)]
-    review_only: bool,
-    /// Retains this many system generations after deployment.
-    #[arg(long, default_value = "2")]
-    keep_generations: NonZeroU32,
-    /// Skips post-deployment garbage collection.
-    #[arg(long, conflicts_with = "keep_generations")]
-    no_gc: bool,
     /// Selects when command logs are retained.
-    #[arg(long, env = "DANCE_LOGS", value_enum, default_value = "on-error")]
+    #[arg(
+        long,
+        env = "DANCE_LOGS",
+        value_enum,
+        default_value = "on-error",
+        global = true
+    )]
     logs: LogMode,
     /// Overrides the command log directory.
-    #[arg(long, env = "DANCE_LOGS_DIR")]
+    #[arg(long, env = "DANCE_LOGS_DIR", global = true)]
     logs_dir: Option<PathBuf>,
-    /// Limits deployment to these inventory IDs.
-    #[arg(value_name = "ID")]
-    ids: Vec<String>,
+    /// Selects the operation to perform.
+    #[command(subcommand)]
+    command: Command,
 }
 
-/// Runs the deployment workflow.
+/// Selects a workflow and its valid options.
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Compares deployed systems with their local configurations.
+    Review {
+        /// Updates selected flakes during review.
+        #[arg(long)]
+        update: bool,
+        /// Limits review to these inventory IDs.
+        #[arg(value_name = "ID")]
+        ids: Vec<String>,
+    },
+    /// Reviews and deploys outdated systems.
+    Deploy {
+        /// Updates selected flakes during review.
+        #[arg(long)]
+        update: bool,
+        /// Deploys without requesting confirmation.
+        #[arg(short, long)]
+        yes: bool,
+        /// Retains this many system generations after deployment.
+        #[arg(long, default_value = "2")]
+        keep_generations: NonZeroU32,
+        /// Skips post-deployment garbage collection.
+        #[arg(long, conflicts_with = "keep_generations")]
+        no_gc: bool,
+        /// Limits deployment to these inventory IDs.
+        #[arg(value_name = "ID")]
+        ids: Vec<String>,
+    },
+}
+
+/// Runs the selected workflow.
 async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
-    let mode = if cli.yes {
-        deployment::Mode::Approved
-    } else if cli.review_only {
-        deployment::Mode::ReviewOnly
-    } else {
-        deployment::Mode::Confirm
+    let (ids, options) = match cli.command {
+        Command::Review { update, ids } => (
+            ids,
+            deployment::Options {
+                update_flakes: update,
+                mode: deployment::Mode::ReviewOnly,
+                keep_generations: None,
+            },
+        ),
+        Command::Deploy {
+            update,
+            yes,
+            keep_generations,
+            no_gc,
+            ids,
+        } => (
+            ids,
+            deployment::Options {
+                update_flakes: update,
+                mode: if yes {
+                    deployment::Mode::Approved
+                } else {
+                    deployment::Mode::Confirm
+                },
+                keep_generations: (!no_gc).then_some(keep_generations),
+            },
+        ),
     };
-    let options = deployment::Options {
-        update_flakes: cli.update,
-        mode,
-        keep_generations: (!cli.no_gc).then_some(cli.keep_generations),
-    };
-    let inventory = Inventory::load(&cli.inventory)?.select(&cli.ids)?;
+    let inventory = Inventory::load(&cli.inventory)?.select(&ids)?;
     deployment::deploy(inventory, options, logs).await
 }
 
