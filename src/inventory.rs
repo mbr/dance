@@ -291,12 +291,7 @@ impl Host {
             logs,
             &label,
             "ssh",
-            &[
-                self.ssh_url().into(),
-                "nix".into(),
-                "store".into(),
-                "gc".into(),
-            ],
+            &[self.ssh_url().into(), "nix-store".into(), "--gc".into()],
             progress,
         )
         .await
