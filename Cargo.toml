@@ -1,6 +1,7 @@
 [package]
 name = "dance"
 description = "Deploy NixOS hosts from a local inventory"
+license = "MIT OR Apache-2.0"
 version = "0.1.0"
 edition = "2024"
 
