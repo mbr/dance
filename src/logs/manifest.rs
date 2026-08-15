@@ -32,6 +32,9 @@ struct CommandRecord {
     /// Contains the process exit code when available.
     #[serde(skip_serializing_if = "Option::is_none")]
     exit_code: Option<i32>,
+    /// Contains elapsed wall-clock-independent time in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
     /// Locates captured standard output relative to the run directory.
     stdout: String,
     /// Locates captured standard error relative to the run directory.
@@ -52,6 +55,9 @@ pub(super) struct Manifest {
     inventory: PathBuf,
     /// Contains the Dance process arguments.
     arguments: Vec<String>,
+    /// Contains elapsed wall-clock-independent time in milliseconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    duration_ms: Option<u64>,
     /// Describes the final workflow failure.
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
@@ -63,10 +69,11 @@ impl Manifest {
     /// Creates state for a running Dance invocation.
     pub(super) fn new(inventory: PathBuf, arguments: Vec<String>) -> Self {
         Self {
-            version: 1,
+            version: 2,
             status: Status::Running,
             inventory,
             arguments,
+            duration_ms: None,
             error: None,
             commands: Vec::new(),
         }
@@ -92,6 +99,7 @@ impl Manifest {
             arguments,
             status: Status::Running,
             exit_code: None,
+            duration_ms: None,
             stdout,
             stderr,
             error: None,
@@ -99,7 +107,7 @@ impl Manifest {
     }
 
     /// Completes a command record from its process status.
-    pub(super) fn complete_command(&mut self, id: usize, status: ExitStatus) {
+    pub(super) fn complete_command(&mut self, id: usize, status: ExitStatus, duration_ms: u64) {
         let record = self.command_mut(id);
         record.status = if status.success() {
             Status::Succeeded
@@ -107,37 +115,42 @@ impl Manifest {
             Status::Failed
         };
         record.exit_code = status.code();
+        record.duration_ms = Some(duration_ms);
     }
 
     /// Marks a command record as failed outside normal process completion.
-    pub(super) fn fail_command(&mut self, id: usize, error: String) {
+    pub(super) fn fail_command(&mut self, id: usize, error: String, duration_ms: u64) {
         let record = self.command_mut(id);
         record.status = Status::Failed;
         record.error = Some(error);
+        record.duration_ms = Some(duration_ms);
     }
 
     /// Marks a running command as interrupted.
-    pub(super) fn interrupt_command(&mut self, id: usize) {
+    pub(super) fn interrupt_command(&mut self, id: usize, duration_ms: u64) {
         let record = self.command_mut(id);
         if matches!(record.status, Status::Running) {
             record.status = Status::Interrupted;
+            record.duration_ms = Some(duration_ms);
         }
     }
 
     /// Finalizes the run state.
-    pub(super) fn finish(&mut self, error: Option<&str>) {
+    pub(super) fn finish(&mut self, error: Option<&str>, duration_ms: u64) {
         self.status = if error.is_some() {
             Status::Failed
         } else {
             Status::Succeeded
         };
+        self.duration_ms = Some(duration_ms);
         self.error = error.map(str::to_owned);
     }
 
     /// Marks a running invocation as interrupted.
-    pub(super) fn interrupt(&mut self) {
+    pub(super) fn interrupt(&mut self, duration_ms: u64) {
         if matches!(self.status, Status::Running) {
             self.status = Status::Interrupted;
+            self.duration_ms = Some(duration_ms);
         }
     }
 

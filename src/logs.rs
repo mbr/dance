@@ -9,6 +9,7 @@ use std::{
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::Mutex,
+    time::Instant,
 };
 
 use clap::ValueEnum;
@@ -54,6 +55,8 @@ pub(crate) struct CommandLog<'a> {
     run: &'a RunLog,
     /// Identifies the corresponding manifest record.
     id: Option<usize>,
+    /// Measures command duration monotonically.
+    started: Instant,
     /// Receives standard output.
     stdout: Option<OutputLog>,
     /// Receives standard error.
@@ -68,6 +71,8 @@ pub(crate) struct RunLog {
     mode: LogMode,
     /// Locates the run directory when logging is enabled.
     directory: Option<PathBuf>,
+    /// Measures run duration monotonically.
+    started: Instant,
     /// Protects records shared by concurrent commands.
     manifest: Mutex<Manifest>,
     /// Records whether the run was explicitly finalized.
@@ -81,6 +86,7 @@ impl RunLog {
         base: Option<&Path>,
         inventory: &Path,
     ) -> Result<Self, Error> {
+        let started = Instant::now();
         let manifest = Manifest::new(
             inventory.to_path_buf(),
             std::env::args_os().map(display_os).collect(),
@@ -89,6 +95,7 @@ impl RunLog {
             return Ok(Self {
                 mode,
                 directory: None,
+                started,
                 manifest: Mutex::new(manifest),
                 finished: false,
             });
@@ -108,6 +115,7 @@ impl RunLog {
         let log = Self {
             mode,
             directory: Some(directory),
+            started,
             manifest: Mutex::new(manifest),
             finished: false,
         };
@@ -122,10 +130,12 @@ impl RunLog {
         program: &str,
         arguments: &[OsString],
     ) -> Result<CommandLog<'a>, Error> {
+        let started = Instant::now();
         let Some(directory) = &self.directory else {
             return Ok(CommandLog {
                 run: self,
                 id: None,
+                started,
                 stdout: None,
                 stderr: None,
                 finished: false,
@@ -158,6 +168,7 @@ impl RunLog {
         Ok(CommandLog {
             run: self,
             id: Some(id),
+            started,
             stdout: Some(OutputLog {
                 path: stdout,
                 file: stdout_log,
@@ -181,7 +192,7 @@ impl RunLog {
                 .manifest
                 .lock()
                 .expect("run log manifest lock should not be poisoned");
-            manifest.finish(error);
+            manifest.finish(error, elapsed_milliseconds(self.started));
             self.write_locked_manifest(&manifest)?;
         }
 
@@ -209,11 +220,11 @@ impl RunLog {
     }
 
     /// Marks an unfinished command as interrupted.
-    fn interrupt_command(&self, id: usize) {
+    fn interrupt_command(&self, id: usize, duration_ms: u64) {
         let Ok(mut manifest) = self.manifest.lock() else {
             return;
         };
-        manifest.interrupt_command(id);
+        manifest.interrupt_command(id, duration_ms);
         let _result = self.write_locked_manifest(&manifest);
     }
 
@@ -256,9 +267,9 @@ impl CommandLog<'_> {
             self.finished = true;
             return Ok(());
         };
-        let result = self
-            .run
-            .update_manifest(|manifest| manifest.complete_command(id, status));
+        let result = self.run.update_manifest(|manifest| {
+            manifest.complete_command(id, status, elapsed_milliseconds(self.started));
+        });
         self.finished = result.is_ok();
         result
     }
@@ -269,9 +280,9 @@ impl CommandLog<'_> {
             self.finished = true;
             return Ok(());
         };
-        let result = self
-            .run
-            .update_manifest(|manifest| manifest.fail_command(id, error.to_owned()));
+        let result = self.run.update_manifest(|manifest| {
+            manifest.fail_command(id, error.to_owned(), elapsed_milliseconds(self.started));
+        });
         self.finished = result.is_ok();
         result
     }
@@ -283,7 +294,8 @@ impl Drop for CommandLog<'_> {
         if !self.finished
             && let Some(id) = self.id
         {
-            self.run.interrupt_command(id);
+            self.run
+                .interrupt_command(id, elapsed_milliseconds(self.started));
         }
     }
 }
@@ -297,9 +309,14 @@ impl Drop for RunLog {
         let Ok(mut manifest) = self.manifest.lock() else {
             return;
         };
-        manifest.interrupt();
+        manifest.interrupt(elapsed_milliseconds(self.started));
         let _result = self.write_locked_manifest(&manifest);
     }
+}
+
+/// Returns a saturated millisecond duration for manifest serialization.
+fn elapsed_milliseconds(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
 
 /// Creates a uniquely named run directory.
@@ -429,7 +446,9 @@ mod tests {
         );
         let manifest =
             fs::read_to_string(directory.join("run.toml")).expect("manifest should be readable");
+        assert!(manifest.contains("version = 2"));
         assert!(manifest.contains("status = \"succeeded\""));
+        assert_eq!(manifest.matches("duration_ms = ").count(), 2);
         assert!(manifest.contains("arguments = [\n    \"ssh\",\n    \"party\",\n]"));
     }
 
@@ -451,6 +470,7 @@ mod tests {
         let manifest = fs::read_to_string(interrupted_path.join("run.toml"))
             .expect("interrupted manifest should be readable");
         assert!(manifest.contains("status = \"interrupted\""));
+        assert!(manifest.contains("duration_ms = "));
 
         let successful = RunLog::start(
             LogMode::OnError,
