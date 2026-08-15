@@ -1,0 +1,4 @@
+/target
+result
+.env
+.ruff_cache

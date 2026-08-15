@@ -1,0 +1,136 @@
+//! Deployment progress bar styling.
+
+use std::time::Duration;
+
+use dialoguer::console::{Style, style};
+use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
+
+use crate::error::Error;
+
+/// Controls how often active spinners advance.
+const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
+/// Defines the layout of the information collection bar.
+const REVIEW_TEMPLATE: &str =
+    "{spinner} collecting info [{bar:20.cyan/blue}] {pos}/{len} {msg:.dim}";
+/// Defines the layout of a host status line.
+const HOST_TEMPLATE: &str = "{spinner} {prefix} {msg}";
+/// Defines the smooth spinner animation and its blank final frame.
+const SPINNER_TICKS: &str =
+    "\u{280b}\u{2819}\u{2839}\u{2838}\u{283c}\u{2834}\u{2826}\u{2827}\u{2807}\u{280f} ";
+
+/// Identifies a phase of an outdated host's deployment.
+#[derive(Clone, Copy)]
+pub(crate) enum DeploymentPhase {
+    /// Builds the desired system.
+    Building,
+    /// Copies the system and performs a dry activation.
+    Preparing,
+    /// Checks the target before or after activation.
+    Verifying,
+    /// Switches the target to the desired system.
+    Activating,
+}
+
+impl DeploymentPhase {
+    /// Returns the phase label.
+    fn label(self) -> &'static str {
+        match self {
+            Self::Building => "building",
+            Self::Preparing => "preparing",
+            Self::Verifying => "verifying target",
+            Self::Activating => "activating",
+        }
+    }
+
+    /// Returns the phase color.
+    fn style(self) -> Style {
+        let style = Style::new().for_stderr();
+        match self {
+            Self::Building => style.blue(),
+            Self::Preparing => style.cyan(),
+            Self::Verifying => style.yellow(),
+            Self::Activating => style.magenta(),
+        }
+    }
+}
+
+/// Creates a progress bar for local and remote host information collection.
+pub(crate) fn review(host_count: usize) -> Result<ProgressBar, Error> {
+    let host_count = u64::try_from(host_count).expect("host count should fit in u64");
+    let length = host_count
+        .checked_mul(2)
+        .expect("information collection step count should fit in u64");
+    let style = ProgressStyle::with_template(REVIEW_TEMPLATE)
+        .map_err(|source| Error::ProgressStyle { source })?
+        .tick_chars(SPINNER_TICKS)
+        .progress_chars("=>-");
+    let progress = ProgressBar::new(length).with_style(style);
+    progress.enable_steady_tick(SPINNER_INTERVAL);
+    Ok(progress)
+}
+
+/// Displays a host identity and status using distinct styles.
+fn set_status(progress: &ProgressBar, host: &str, status: &str, status_style: Style) {
+    let host = style(format!("{host:<12}")).for_stderr().bold();
+    let status = status_style.apply_to(format!("{status:<16}"));
+    progress.set_prefix(format!("{host} {status}"));
+    progress.set_message("");
+}
+
+/// Displays a host identity and its current deployment phase.
+pub(crate) fn set_phase(progress: &ProgressBar, host: &str, phase: DeploymentPhase) {
+    set_status(progress, host, phase.label(), phase.style());
+}
+
+/// Marks a host as successfully activated.
+pub(crate) fn finish(progress: &ProgressBar, host: &str) {
+    let message = progress.message();
+    set_status(
+        progress,
+        host,
+        "activated",
+        Style::new().for_stderr().green(),
+    );
+    progress.finish_with_message(message);
+}
+
+/// Marks a host deployment as failed while retaining its phase.
+pub(crate) fn fail(progress: &ProgressBar) {
+    let failed = style("failed".to_owned()).for_stderr().red();
+    progress.finish_with_message(format!("{failed}"));
+}
+
+/// Creates consistently styled progress bars for a group of hosts.
+pub(crate) struct ProgressDisplay {
+    /// Coordinates host status lines on the terminal.
+    progress: MultiProgress,
+    /// Defines the common host status presentation.
+    style: ProgressStyle,
+}
+
+impl ProgressDisplay {
+    /// Creates a per-host terminal progress display.
+    pub(crate) fn new() -> Result<Self, Error> {
+        let style = ProgressStyle::with_template(HOST_TEMPLATE)
+            .map_err(|source| Error::ProgressStyle { source })?
+            .tick_chars(SPINNER_TICKS);
+        Ok(Self {
+            progress: MultiProgress::new(),
+            style,
+        })
+    }
+
+    /// Creates retained progress bars for a set of hosts.
+    pub(crate) fn hosts<'a>(&self, names: impl IntoIterator<Item = &'a str>) -> Vec<ProgressBar> {
+        names
+            .into_iter()
+            .map(|name| {
+                let progress = self.progress.add(ProgressBar::new_spinner());
+                progress.set_style(self.style.clone());
+                set_status(&progress, name, "", Style::new());
+                progress.enable_steady_tick(SPINNER_INTERVAL);
+                progress
+            })
+            .collect()
+    }
+}
