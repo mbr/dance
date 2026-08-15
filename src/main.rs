@@ -60,17 +60,42 @@ async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
     deployment::deploy(inventory, cli.update, mode, logs).await
 }
 
+/// Reports a workflow result and its retained diagnostic directory.
+fn report(result: Result<(), Error>, logs: Result<Option<PathBuf>, Error>) -> ExitCode {
+    let (succeeded, path) = match (result, logs) {
+        (Ok(()), Ok(path)) => (true, path),
+        (Err(error), Ok(path)) => {
+            eprintln!("error: {}", error.display_full());
+            (false, path)
+        }
+        (Ok(()), Err(error)) => {
+            eprintln!("error: {}", error.display_full());
+            (false, None)
+        }
+        (Err(workflow), Err(logs)) => {
+            eprintln!("error: {}", workflow.display_full());
+            eprintln!("error: {}", logs.display_full());
+            (false, None)
+        }
+    };
+    println!("status: {}", if succeeded { "succeeded" } else { "failed" });
+    if let Some(path) = path {
+        println!("logs: {}", path.display());
+    }
+    if succeeded {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
 /// Reports whether the deployment workflow succeeded.
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
     let logs = match RunLog::start(cli.logs, cli.logs_dir.as_deref(), &cli.inventory) {
         Ok(logs) => logs,
-        Err(error) => {
-            eprintln!("error: {}", error.display_full());
-            println!("status: failed");
-            return ExitCode::FAILURE;
-        }
+        Err(error) => return report(Err(error), Ok(None)),
     };
     let result = run(cli, &logs).await;
     let error_message = result
@@ -78,33 +103,5 @@ async fn main() -> ExitCode {
         .err()
         .map(|error| error.display_full().to_string());
     let log_directory = logs.finish(error_message.as_deref());
-
-    match (result, log_directory) {
-        (Ok(()), Ok(path)) => {
-            println!("status: succeeded");
-            if let Some(path) = path {
-                println!("logs: {}", path.display());
-            }
-            ExitCode::SUCCESS
-        }
-        (Err(error), Ok(path)) => {
-            eprintln!("error: {}", error.display_full());
-            println!("status: failed");
-            if let Some(path) = path {
-                println!("logs: {}", path.display());
-            }
-            ExitCode::FAILURE
-        }
-        (Ok(()), Err(error)) => {
-            eprintln!("error: {}", error.display_full());
-            println!("status: failed");
-            ExitCode::FAILURE
-        }
-        (Err(workflow), Err(logs)) => {
-            eprintln!("error: {}", workflow.display_full());
-            eprintln!("error: {}", logs.display_full());
-            println!("status: failed");
-            ExitCode::FAILURE
-        }
-    }
+    report(result, log_directory)
 }

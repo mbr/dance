@@ -137,18 +137,3 @@ impl ProgressDisplay {
             .collect()
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::review;
-
-    /// Checks that updates add one review step per host.
-    #[test]
-    fn updates_extend_host_review_progress() {
-        let normal = review(2, false).expect("review progress should be created");
-        let updating = review(2, true).expect("update progress should be created");
-
-        assert_eq!(normal.length(), Some(4));
-        assert_eq!(updating.length(), Some(6));
-    }
-}

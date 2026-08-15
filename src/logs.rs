@@ -1,18 +1,20 @@
 //! Persistent subprocess diagnostics.
 
+mod manifest;
+
 use std::{
     ffi::{OsStr, OsString},
-    fs::{self, OpenOptions},
-    io::{self, Write},
+    fs::{self, File, OpenOptions},
+    io::Write,
     path::{Path, PathBuf},
-    process::{self, ExitStatus},
+    process::ExitStatus,
     sync::Mutex,
-    time::{SystemTime, UNIX_EPOCH},
 };
 
 use clap::ValueEnum;
-use serde::Serialize;
+use uuid::Uuid;
 
+use self::manifest::Manifest;
 use crate::error::Error;
 
 /// Selects when completed run logs are retained.
@@ -26,69 +28,38 @@ pub(crate) enum LogMode {
     Never,
 }
 
-/// Describes the state of a run or command.
-#[derive(Clone, Copy, Serialize)]
-#[serde(rename_all = "kebab-case")]
-enum Status {
-    /// Indicates that work has not completed.
-    Running,
-    /// Indicates successful completion.
-    Succeeded,
-    /// Indicates failed completion.
-    Failed,
-    /// Indicates that the run guard was dropped before completion.
-    Interrupted,
+/// Writes one subprocess output stream to its diagnostic file.
+pub(crate) struct OutputLog {
+    /// Locates the output file for error reporting.
+    path: PathBuf,
+    /// Receives subprocess output bytes.
+    file: File,
 }
 
-/// Describes one captured subprocess.
-#[derive(Serialize)]
-struct CommandRecord {
-    /// Uniquely identifies the command within the run.
-    id: usize,
-    /// Describes the command's role in the workflow.
-    label: String,
-    /// Contains the program and its arguments.
-    arguments: Vec<String>,
-    /// Describes how the command completed.
-    status: Status,
-    /// Contains the process exit code when available.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    exit_code: Option<i32>,
-    /// Locates captured standard output relative to the run directory.
-    stdout: String,
-    /// Locates captured standard error relative to the run directory.
-    stderr: String,
-    /// Describes failures outside a process exit status.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
+impl OutputLog {
+    /// Writes output bytes to the diagnostic file.
+    pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+        self.file
+            .write_all(bytes)
+            .map_err(|source| Error::WriteLog {
+                path: self.path.clone(),
+                source,
+            })
+    }
 }
 
-/// Describes a complete Dance invocation.
-#[derive(Serialize)]
-struct Manifest {
-    /// Identifies the manifest format.
-    version: u8,
-    /// Describes how the invocation completed.
-    status: Status,
-    /// Locates the selected inventory.
-    inventory: PathBuf,
-    /// Contains the Dance process arguments.
-    arguments: Vec<String>,
-    /// Describes the final workflow failure.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    error: Option<String>,
-    /// Contains subprocesses in start order.
-    commands: Vec<CommandRecord>,
-}
-
-/// Identifies files belonging to one captured subprocess.
-pub(crate) struct CommandLog {
+/// Guards diagnostic artifacts for one captured subprocess.
+pub(crate) struct CommandLog<'a> {
+    /// Owns the corresponding run manifest.
+    run: &'a RunLog,
     /// Identifies the corresponding manifest record.
     id: Option<usize>,
-    /// Locates the standard output file.
-    stdout: Option<PathBuf>,
-    /// Locates the standard error file.
-    stderr: Option<PathBuf>,
+    /// Receives standard output.
+    stdout: Option<OutputLog>,
+    /// Receives standard error.
+    stderr: Option<OutputLog>,
+    /// Records whether the command was explicitly finalized.
+    finished: bool,
 }
 
 /// Owns the diagnostic artifacts for one Dance invocation.
@@ -110,14 +81,10 @@ impl RunLog {
         base: Option<&Path>,
         inventory: &Path,
     ) -> Result<Self, Error> {
-        let manifest = Manifest {
-            version: 1,
-            status: Status::Running,
-            inventory: inventory.to_path_buf(),
-            arguments: std::env::args_os().map(display_os).collect(),
-            error: None,
-            commands: Vec::new(),
-        };
+        let manifest = Manifest::new(
+            inventory.to_path_buf(),
+            std::env::args_os().map(display_os).collect(),
+        );
         if matches!(mode, LogMode::Never) {
             return Ok(Self {
                 mode,
@@ -149,111 +116,58 @@ impl RunLog {
     }
 
     /// Starts a record for a subprocess.
-    pub(crate) fn command(
-        &self,
+    pub(crate) fn command<'a>(
+        &'a self,
         label: &str,
         program: &str,
         arguments: &[OsString],
-    ) -> Result<CommandLog, Error> {
+    ) -> Result<CommandLog<'a>, Error> {
         let Some(directory) = &self.directory else {
             return Ok(CommandLog {
+                run: self,
                 id: None,
                 stdout: None,
                 stderr: None,
+                finished: false,
             });
         };
         let mut manifest = self
             .manifest
             .lock()
             .expect("run log manifest lock should not be poisoned");
-        let id = manifest.commands.len() + 1;
+        let id = manifest.next_command_id();
         let stem = format!("{id:03}-{}", sanitize(label));
         let stdout_name = format!("{stem}.stdout");
         let stderr_name = format!("{stem}.stderr");
         let stdout = directory.join(&stdout_name);
         let stderr = directory.join(&stderr_name);
-        write_secure(&stdout, &[])?;
-        write_secure(&stderr, &[])?;
+        let stdout_log = open_secure(&stdout)?;
+        let stderr_log = open_secure(&stderr)?;
 
         let mut command_arguments = Vec::with_capacity(arguments.len() + 1);
         command_arguments.push(program.to_owned());
         command_arguments.extend(arguments.iter().map(display_os));
-        manifest.commands.push(CommandRecord {
+        manifest.start_command(
             id,
-            label: label.to_owned(),
-            arguments: command_arguments,
-            status: Status::Running,
-            exit_code: None,
-            stdout: stdout_name,
-            stderr: stderr_name,
-            error: None,
-        });
+            label.to_owned(),
+            command_arguments,
+            stdout_name,
+            stderr_name,
+        );
         self.write_locked_manifest(&manifest)?;
         Ok(CommandLog {
+            run: self,
             id: Some(id),
-            stdout: Some(stdout),
-            stderr: Some(stderr),
+            stdout: Some(OutputLog {
+                path: stdout,
+                file: stdout_log,
+            }),
+            stderr: Some(OutputLog {
+                path: stderr,
+                file: stderr_log,
+            }),
+            finished: false,
         })
-    }
-
-    /// Completes a subprocess record and writes its captured output.
-    pub(crate) fn complete_command(
-        &self,
-        command: &CommandLog,
-        stdout: &[u8],
-        stderr: &[u8],
-        status: ExitStatus,
-    ) -> Result<(), Error> {
-        let Some(id) = command.id else {
-            return Ok(());
-        };
-        write_secure(
-            command
-                .stdout
-                .as_deref()
-                .expect("enabled command log should have a stdout path"),
-            stdout,
-        )?;
-        write_secure(
-            command
-                .stderr
-                .as_deref()
-                .expect("enabled command log should have a stderr path"),
-            stderr,
-        )?;
-        let mut manifest = self
-            .manifest
-            .lock()
-            .expect("run log manifest lock should not be poisoned");
-        let record = manifest
-            .commands
-            .get_mut(id - 1)
-            .expect("command log ID should identify a manifest record");
-        record.status = if status.success() {
-            Status::Succeeded
-        } else {
-            Status::Failed
-        };
-        record.exit_code = status.code();
-        self.write_locked_manifest(&manifest)
-    }
-
-    /// Marks a subprocess record as failed outside normal process completion.
-    pub(crate) fn fail_command(&self, command: &CommandLog, error: &str) -> Result<(), Error> {
-        let Some(id) = command.id else {
-            return Ok(());
-        };
-        let mut manifest = self
-            .manifest
-            .lock()
-            .expect("run log manifest lock should not be poisoned");
-        let record = manifest
-            .commands
-            .get_mut(id - 1)
-            .expect("command log ID should identify a manifest record");
-        record.status = Status::Failed;
-        record.error = Some(error.to_owned());
-        self.write_locked_manifest(&manifest)
     }
 
     /// Finalizes the run and returns the retained log directory.
@@ -267,12 +181,7 @@ impl RunLog {
                 .manifest
                 .lock()
                 .expect("run log manifest lock should not be poisoned");
-            manifest.status = if error.is_some() {
-                Status::Failed
-            } else {
-                Status::Succeeded
-            };
-            manifest.error = error.map(str::to_owned);
+            manifest.finish(error);
             self.write_locked_manifest(&manifest)?;
         }
 
@@ -287,6 +196,25 @@ impl RunLog {
         };
         self.finished = true;
         Ok(retained)
+    }
+
+    /// Updates run state and persists the manifest.
+    fn update_manifest(&self, update: impl FnOnce(&mut Manifest)) -> Result<(), Error> {
+        let mut manifest = self
+            .manifest
+            .lock()
+            .expect("run log manifest lock should not be poisoned");
+        update(&mut manifest);
+        self.write_locked_manifest(&manifest)
+    }
+
+    /// Marks an unfinished command as interrupted.
+    fn interrupt_command(&self, id: usize) {
+        let Ok(mut manifest) = self.manifest.lock() else {
+            return;
+        };
+        manifest.interrupt_command(id);
+        let _result = self.write_locked_manifest(&manifest);
     }
 
     /// Writes the current manifest atomically.
@@ -316,46 +244,73 @@ impl RunLog {
     }
 }
 
+impl CommandLog<'_> {
+    /// Takes the output streams used while the command runs.
+    pub(crate) fn take_outputs(&mut self) -> (Option<OutputLog>, Option<OutputLog>) {
+        (self.stdout.take(), self.stderr.take())
+    }
+
+    /// Completes the command after its output has been captured.
+    pub(crate) fn complete(mut self, status: ExitStatus) -> Result<(), Error> {
+        let Some(id) = self.id else {
+            self.finished = true;
+            return Ok(());
+        };
+        let result = self
+            .run
+            .update_manifest(|manifest| manifest.complete_command(id, status));
+        self.finished = result.is_ok();
+        result
+    }
+
+    /// Marks the command as failed outside normal process completion.
+    pub(crate) fn fail(mut self, error: &str) -> Result<(), Error> {
+        let Some(id) = self.id else {
+            self.finished = true;
+            return Ok(());
+        };
+        let result = self
+            .run
+            .update_manifest(|manifest| manifest.fail_command(id, error.to_owned()));
+        self.finished = result.is_ok();
+        result
+    }
+}
+
+impl Drop for CommandLog<'_> {
+    /// Preserves commands that were not explicitly finalized.
+    fn drop(&mut self) {
+        if !self.finished
+            && let Some(id) = self.id
+        {
+            self.run.interrupt_command(id);
+        }
+    }
+}
+
 impl Drop for RunLog {
     /// Preserves unfinished runs and marks them as interrupted.
     fn drop(&mut self) {
         if self.finished || self.directory.is_none() {
             return;
         }
-        let mut manifest = self
-            .manifest
-            .lock()
-            .expect("run log manifest lock should not be poisoned");
-        if matches!(manifest.status, Status::Running) {
-            manifest.status = Status::Interrupted;
-            let _result = self.write_locked_manifest(&manifest);
-        }
+        let Ok(mut manifest) = self.manifest.lock() else {
+            return;
+        };
+        manifest.interrupt();
+        let _result = self.write_locked_manifest(&manifest);
     }
 }
 
 /// Creates a uniquely named run directory.
 fn create_run_directory(base: &Path) -> Result<PathBuf, Error> {
-    let timestamp = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_millis());
-    let stem = format!("{timestamp}-{}", process::id());
-    for suffix in 0_u32.. {
-        let name = if suffix == 0 {
-            stem.clone()
-        } else {
-            format!("{stem}-{suffix}")
-        };
-        let path = base.join(name);
-        match fs::create_dir(&path) {
-            Ok(()) => {
-                secure_directory(&path)?;
-                return Ok(path);
-            }
-            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(source) => return Err(Error::CreateLogDirectory { path, source }),
-        }
-    }
-    unreachable!("run log suffix space should not be exhausted")
+    let path = base.join(Uuid::now_v7().to_string());
+    fs::create_dir(&path).map_err(|source| Error::CreateLogDirectory {
+        path: path.clone(),
+        source,
+    })?;
+    secure_directory(&path)?;
+    Ok(path)
 }
 
 /// Converts an operating-system string for diagnostics.
@@ -378,8 +333,8 @@ fn sanitize(label: &str) -> String {
     value.trim_matches('-').to_owned()
 }
 
-/// Writes a file with private permissions.
-fn write_secure(path: &Path, contents: &[u8]) -> Result<(), Error> {
+/// Opens a truncated file with private permissions.
+fn open_secure(path: &Path) -> Result<File, Error> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]
@@ -388,15 +343,19 @@ fn write_secure(path: &Path, contents: &[u8]) -> Result<(), Error> {
 
         options.mode(0o600);
     }
-    let mut file = options.open(path).map_err(|source| Error::WriteLog {
+    options.open(path).map_err(|source| Error::WriteLog {
         path: path.to_path_buf(),
         source,
-    })?;
+    })
+}
+
+/// Writes a file with private permissions.
+fn write_secure(path: &Path, contents: &[u8]) -> Result<(), Error> {
+    let mut file = open_secure(path)?;
     file.write_all(contents).map_err(|source| Error::WriteLog {
         path: path.to_path_buf(),
         source,
-    })?;
-    Ok(())
+    })
 }
 
 /// Restricts access to a run directory.
@@ -413,4 +372,102 @@ fn secure_directory(path: &Path) -> Result<(), Error> {
         })?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{fs, path::Path, process::Command};
+
+    use tempfile::tempdir;
+
+    use super::{LogMode, RunLog};
+
+    /// Checks that retained runs contain command metadata and exact output.
+    #[test]
+    fn retained_run_contains_command_artifacts() {
+        let base = tempdir().expect("temporary directory should be created");
+        let logs = RunLog::start(
+            LogMode::Always,
+            Some(base.path()),
+            Path::new("inventory.toml"),
+        )
+        .expect("run log should start");
+        let mut command = logs
+            .command("review party", "ssh", &["party".into()])
+            .expect("command log should start");
+        let (mut stdout, mut stderr) = command.take_outputs();
+        stdout
+            .as_mut()
+            .expect("standard output log should exist")
+            .write(b"standard output\n")
+            .expect("standard output should be logged");
+        stderr
+            .as_mut()
+            .expect("standard error log should exist")
+            .write(b"standard error\n")
+            .expect("standard error should be logged");
+        let status = Command::new("true")
+            .status()
+            .expect("successful status should be produced");
+        command
+            .complete(status)
+            .expect("command log should complete");
+        let directory = logs
+            .finish(None)
+            .expect("run log should finish")
+            .expect("always logs should be retained");
+
+        assert_eq!(
+            fs::read(directory.join("001-review-party.stdout"))
+                .expect("standard output log should be readable"),
+            b"standard output\n"
+        );
+        assert_eq!(
+            fs::read(directory.join("001-review-party.stderr"))
+                .expect("standard error log should be readable"),
+            b"standard error\n"
+        );
+        let manifest =
+            fs::read_to_string(directory.join("run.toml")).expect("manifest should be readable");
+        assert!(manifest.contains("status = \"succeeded\""));
+        assert!(manifest.contains("arguments = [\n    \"ssh\",\n    \"party\",\n]"));
+    }
+
+    /// Checks fail-safe retention and successful cleanup for automatic logs.
+    #[test]
+    fn automatic_logs_preserve_interruptions_and_remove_successes() {
+        let base = tempdir().expect("temporary directory should be created");
+        let interrupted = RunLog::start(
+            LogMode::OnError,
+            Some(base.path()),
+            Path::new("inventory.toml"),
+        )
+        .expect("run log should start");
+        let interrupted_path = interrupted
+            .directory
+            .clone()
+            .expect("enabled logs should have a directory");
+        drop(interrupted);
+        let manifest = fs::read_to_string(interrupted_path.join("run.toml"))
+            .expect("interrupted manifest should be readable");
+        assert!(manifest.contains("status = \"interrupted\""));
+
+        let successful = RunLog::start(
+            LogMode::OnError,
+            Some(base.path()),
+            Path::new("inventory.toml"),
+        )
+        .expect("run log should start");
+        let successful_path = successful
+            .directory
+            .clone()
+            .expect("enabled logs should have a directory");
+        assert_eq!(
+            successful
+                .finish(None)
+                .expect("successful run should finish"),
+            None
+        );
+        assert!(!successful_path.exists());
+    }
 }

@@ -122,11 +122,11 @@ pub(crate) async fn deploy(
         return Err(Error::ConfirmationRequired);
     }
 
-    let theme = ColorfulTheme {
-        success_prefix: style(">".to_owned()).for_stderr().green(),
-        ..ColorfulTheme::default()
-    };
     if matches!(mode, Mode::Confirm) {
+        let theme = ColorfulTheme {
+            success_prefix: style(">".to_owned()).for_stderr().green(),
+            ..ColorfulTheme::default()
+        };
         let approved = Confirm::with_theme(&theme)
             .with_prompt("Deploy the outdated systems?")
             .default(false)

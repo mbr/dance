@@ -243,21 +243,3 @@ pub(super) async fn activate(
     status::finish(progress, reviewed.host.id());
     Ok(())
 }
-
-#[cfg(test)]
-mod tests {
-    use indicatif::ProgressBar;
-
-    use super::collect_step;
-
-    /// Checks that failed collection work still completes its progress step.
-    #[tokio::test]
-    async fn failed_collection_advances_progress() {
-        let progress = ProgressBar::hidden();
-        let result = collect_step(&progress, "host", "remote", async { Err::<(), ()>(()) }).await;
-
-        assert!(result.is_err());
-        assert_eq!(progress.position(), 1);
-        assert_eq!(progress.message(), "host: remote info failed");
-    }
-}

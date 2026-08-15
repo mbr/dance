@@ -8,7 +8,7 @@ use std::{
 use futures::future::join_all;
 use indicatif::ProgressBar;
 
-use crate::{error::Error, logs::RunLog, process::run};
+use crate::{error::Error, logs::RunLog, process::run_status};
 
 /// Contains the failures from a group of flake updates.
 #[derive(Default)]
@@ -39,7 +39,7 @@ async fn flake(
     progress: &ProgressBar,
 ) -> (PathBuf, Result<(), Error>) {
     let label = format!("update-{}", path.display());
-    let result = run(
+    let result = run_status(
         logs,
         &label,
         "nix",
@@ -51,8 +51,7 @@ async fn flake(
         ],
         progress,
     )
-    .await
-    .map(|_output| ());
+    .await;
     let status = if result.is_ok() { "updated" } else { "failed" };
     progress.set_message(format!("{}: inputs {status}", path.display()));
     progress.inc(u64::try_from(host_count).expect("host count should fit in u64"));

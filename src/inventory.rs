@@ -10,7 +10,12 @@ use indexmap::IndexMap;
 use indicatif::ProgressBar;
 use serde::Deserialize;
 
-use crate::{error::Error, logs::RunLog, process::run, store_path::StorePath};
+use crate::{
+    error::Error,
+    logs::RunLog,
+    process::{run, run_status},
+    store_path::StorePath,
+};
 
 /// Contains the hosts managed by Dance.
 #[derive(Deserialize)]
@@ -177,7 +182,7 @@ impl Host {
     /// Builds the host configuration in the local Nix store.
     pub(crate) async fn build(&self, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
         let label = format!("deploy-{}-build", self.id);
-        run(
+        run_status(
             logs,
             &label,
             "nixos-rebuild",
@@ -189,8 +194,7 @@ impl Host {
             ],
             progress,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Copies a built system to the target and performs a dry activation.
@@ -201,7 +205,7 @@ impl Host {
         progress: &ProgressBar,
     ) -> Result<(), Error> {
         let label = format!("deploy-{}-prepare", self.id);
-        run(
+        run_status(
             logs,
             &label,
             "nixos-rebuild",
@@ -214,8 +218,7 @@ impl Host {
             ],
             progress,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Activates a locally built system on the target.
@@ -226,7 +229,7 @@ impl Host {
         progress: &ProgressBar,
     ) -> Result<(), Error> {
         let label = format!("deploy-{}-activate", self.id);
-        run(
+        run_status(
             logs,
             &label,
             "nixos-rebuild",
@@ -239,8 +242,7 @@ impl Host {
             ],
             progress,
         )
-        .await?;
-        Ok(())
+        .await
     }
 
     /// Returns the complete flake output used to evaluate the system path.
