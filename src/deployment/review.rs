@@ -135,7 +135,7 @@ pub(super) async fn deployed(
         progress,
         host.id(),
         "remote",
-        operations::deployed_store_path(host, "review", logs, progress),
+        operations::deployed_store_path(host, logs, progress),
     )
     .await
 }

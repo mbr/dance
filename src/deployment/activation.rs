@@ -145,7 +145,7 @@ async fn fail(
 
 /// Temporarily activates, verifies, and persists one host configuration.
 pub(super) async fn activate(
-    reviewed: ReviewedHost,
+    reviewed: &ReviewedHost,
     options: ActivationOptions,
     logs: &RunLog,
     progress: &ProgressBar,
@@ -153,7 +153,7 @@ pub(super) async fn activate(
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Testing);
     if let Err(error) = operations::test(&reviewed.host, logs, progress).await {
         return fail(
-            &reviewed,
+            reviewed,
             options,
             rollback::Persistence::Runtime,
             error,
@@ -167,7 +167,7 @@ pub(super) async fn activate(
         && let Err(error) = verification::run_configured(&reviewed.host, logs, progress).await
     {
         return fail(
-            &reviewed,
+            reviewed,
             options,
             rollback::Persistence::Runtime,
             error,
@@ -180,7 +180,7 @@ pub(super) async fn activate(
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Switching);
     if let Err(error) = operations::switch(&reviewed.host, logs, progress).await {
         return fail(
-            &reviewed,
+            reviewed,
             options,
             rollback::Persistence::System,
             error,

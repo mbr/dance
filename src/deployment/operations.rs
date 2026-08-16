@@ -14,13 +14,12 @@ pub(super) const SSH_TIMEOUT: Duration = Duration::from_mins(1);
 /// Reads the system currently activated on a target.
 pub(super) async fn deployed_store_path(
     host: &Host,
-    phase: &str,
     logs: &RunLog,
     progress: &ProgressBar,
 ) -> Result<StorePath, Error> {
     let output = Invocation::new(
         logs,
-        format!("{phase}-{}-remote", host.id()),
+        format!("review-{}-remote", host.id()),
         "ssh",
         progress,
     )

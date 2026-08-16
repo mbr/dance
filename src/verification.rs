@@ -181,8 +181,8 @@ enum Outcome {
 }
 
 /// Runs the verifier configured for one host.
-async fn verify_host(host: Host, logs: &RunLog, progress: &ProgressBar) -> Outcome {
-    match run_configured(&host, logs, progress).await {
+async fn verify_host(host: &Host, logs: &RunLog, progress: &ProgressBar) -> Outcome {
+    match run_configured(host, logs, progress).await {
         Ok(ConfiguredOutcome::Verified) => {
             status::verified(progress, host.id());
             Outcome::Verified
@@ -202,7 +202,7 @@ pub(crate) async fn verify(inventory: Inventory, logs: &RunLog) -> Result<(), Er
     let progresses = display.hosts(hosts.iter().map(Host::id));
     let outcomes = join_all(hosts.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
-            let outcome = verify_host(host, logs, progress).await;
+            let outcome = verify_host(&host, logs, progress).await;
             if matches!(&outcome, Outcome::Failed(_)) {
                 status::fail(progress);
             }

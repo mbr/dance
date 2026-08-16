@@ -128,7 +128,6 @@ async fn collect(
     let mut failed = 0;
     let mut first_error = update_error;
     for ((host, deployed), expected) in hosts.into_iter().zip(deployed).zip(expected) {
-        let failed_row = HostRow::failed(&host);
         match (deployed, expected) {
             (Ok(deployed), Some(Ok(expected))) => match review::review(host, deployed, &expected) {
                 ReviewOutcome::UpToDate(row) => {
@@ -141,12 +140,12 @@ async fn collect(
                 }
             },
             (Err(error), _) | (_, Some(Err(error))) => {
-                rows.push(failed_row);
+                rows.push(HostRow::failed(&host));
                 failed += 1;
                 first_error.get_or_insert(error);
             }
             (_, None) => {
-                rows.push(failed_row);
+                rows.push(HostRow::failed(&host));
                 failed += 1;
             }
         }
@@ -196,9 +195,8 @@ async fn activate(
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
     let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
-            let id = host.id().to_owned();
-            let outcome = activation::activate(host, options, logs, progress).await;
-            outcome.finish_progress(&id, progress);
+            let outcome = activation::activate(&host, options, logs, progress).await;
+            outcome.finish_progress(host.id(), progress);
             outcome
         },
     ))
