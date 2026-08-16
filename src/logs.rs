@@ -167,6 +167,7 @@ impl RunLog {
             stderr_name,
         );
         self.write_locked_manifest(&manifest)?;
+        drop(manifest);
         Ok(CommandLog {
             run: self,
             id: Some(id),
@@ -196,6 +197,7 @@ impl RunLog {
                 .expect("run log manifest lock should not be poisoned");
             manifest.finish(error, elapsed_milliseconds(self.started));
             self.write_locked_manifest(&manifest)?;
+            drop(manifest);
         }
 
         let retained = if error.is_none() && matches!(self.mode, LogMode::OnError) {

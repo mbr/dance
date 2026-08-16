@@ -165,9 +165,9 @@ pub(crate) enum Error {
         /// Identifies the inventory host.
         host: String,
         /// Contains the deployment failure that initiated rollback.
-        trigger: Box<Error>,
+        trigger: Box<Self>,
         /// Contains the immediate rollback failure.
-        rollback: Box<Error>,
+        rollback: Box<Self>,
     },
     /// Indicates that unattended deployment was not explicitly approved.
     #[error("deployment requires `--yes` without a terminal")]
