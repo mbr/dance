@@ -8,12 +8,10 @@ use crate::{
     error::Error,
     inventory::Host,
     logs::RunLog,
-    process::{run, run_bounded, run_status, run_status_bounded},
+    process::{run, run_bounded, run_status},
     store_path::StorePath,
 };
 
-/// Limits how long target activation may run.
-const ACTIVATION_TIMEOUT: Duration = Duration::from_secs(240);
 /// Limits routine SSH operations.
 pub(super) const SSH_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -66,73 +64,40 @@ pub(super) async fn expected_store_path(
     })
 }
 
-/// Builds a host configuration and an optional additional installable.
-pub(super) async fn build(
-    host: &Host,
-    additional_installable: Option<&str>,
-    logs: &RunLog,
-    progress: &ProgressBar,
-) -> Result<(), Error> {
-    let label = format!("deploy-{}-build", host.id());
-    let mut arguments = vec![
-        "build".into(),
-        "--no-link".into(),
-        flake_output(host).into(),
-    ];
-    if let Some(installable) = additional_installable {
-        arguments.push(installable.into());
-    }
-    run_status(logs, &label, "nix", &arguments, progress).await
+/// Builds and temporarily activates a host configuration.
+pub(super) async fn test(host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
+    rebuild(host, "test", logs, progress).await
 }
 
-/// Copies a built system to a target and performs a dry activation.
-pub(super) async fn prepare_activation(
+/// Builds and persistently activates a host configuration.
+pub(super) async fn switch(
     host: &Host,
-    store_path: &StorePath,
     logs: &RunLog,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
-    let label = format!("deploy-{}-prepare", host.id());
+    rebuild(host, "switch", logs, progress).await
+}
+
+/// Delegates a complete deployment action to `nixos-rebuild`.
+async fn rebuild(
+    host: &Host,
+    action: &str,
+    logs: &RunLog,
+    progress: &ProgressBar,
+) -> Result<(), Error> {
+    let label = format!("deploy-{}-{action}", host.id());
     run_status(
         logs,
         &label,
         "nixos-rebuild",
         &[
-            "dry-activate".into(),
+            action.into(),
             "--use-substitutes".into(),
-            "--store-path".into(),
-            store_path.as_ref().as_os_str().to_owned(),
+            "--flake".into(),
+            flake(host).into(),
             "--target-host".into(),
             host.ssh_url().into(),
         ],
-        progress,
-    )
-    .await
-}
-
-/// Activates a built system on a target within the activation deadline.
-pub(super) async fn activate(
-    host: &Host,
-    store_path: &StorePath,
-    logs: &RunLog,
-    progress: &ProgressBar,
-) -> Result<(), Error> {
-    let label = format!("deploy-{}-activate", host.id());
-    run_status_bounded(
-        logs,
-        &label,
-        "nixos-rebuild",
-        &[
-            "switch".into(),
-            "--no-reexec".into(),
-            "--use-substitutes".into(),
-            "--store-path".into(),
-            store_path.as_ref().as_os_str().to_owned(),
-            "--target-host".into(),
-            host.ssh_url().into(),
-        ],
-        &[],
-        ACTIVATION_TIMEOUT,
         progress,
     )
     .await
@@ -187,7 +152,12 @@ pub(super) async fn collect_garbage(
     .await
 }
 
-/// Returns the complete flake output used to evaluate and build a system.
+/// Returns the flake selector accepted by `nixos-rebuild`.
+fn flake(host: &Host) -> String {
+    format!("{}#{}", host.flake_path().display(), host.flake_name())
+}
+
+/// Returns the complete flake output used to evaluate a system.
 fn flake_output(host: &Host) -> String {
     format!(
         "{}#nixosConfigurations.{}.config.system.build.toplevel.outPath",

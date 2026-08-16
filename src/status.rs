@@ -21,18 +21,14 @@ const SPINNER_TICKS: &str =
 /// Identifies a phase of host work.
 #[derive(Clone, Copy)]
 pub(crate) enum DeploymentPhase {
-    /// Builds local derivations.
-    Building,
-    /// Copies the system and performs a dry activation.
-    Preparing,
-    /// Checks the target before or after activation.
-    Verifying,
-    /// Arms a target-side rollback watchdog.
-    ArmingRollback,
-    /// Switches the target to the desired system.
-    Activating,
+    /// Builds and temporarily activates the desired system.
+    Testing,
+    /// Discovers and builds a configured verifier.
+    BuildingVerifier,
     /// Runs the configured verifier.
     RunningVerifier,
+    /// Makes the tested system persistent.
+    Switching,
     /// Restores the reviewed system.
     RollingBack,
     /// Prunes old generations and unreachable store paths.
@@ -43,12 +39,10 @@ impl DeploymentPhase {
     /// Returns the phase label.
     fn label(self) -> &'static str {
         match self {
-            Self::Building => "building",
-            Self::Preparing => "preparing",
-            Self::Verifying => "verifying target",
-            Self::ArmingRollback => "arming rollback",
-            Self::Activating => "activating",
+            Self::Testing => "testing",
+            Self::BuildingVerifier => "building verifier",
             Self::RunningVerifier => "running verifier",
+            Self::Switching => "switching",
             Self::RollingBack => "rolling back",
             Self::CollectingGarbage => "collecting garbage",
         }
@@ -58,10 +52,9 @@ impl DeploymentPhase {
     fn style(self) -> Style {
         let style = Style::new().for_stderr();
         match self {
-            Self::Building => style.blue(),
-            Self::Preparing => style.cyan(),
-            Self::Verifying | Self::ArmingRollback | Self::RunningVerifier => style.yellow(),
-            Self::Activating => style.magenta(),
+            Self::Testing | Self::BuildingVerifier => style.blue(),
+            Self::RunningVerifier => style.yellow(),
+            Self::Switching => style.magenta(),
             Self::RollingBack => style.red(),
             Self::CollectingGarbage => style.yellow(),
         }
@@ -133,6 +126,14 @@ pub(crate) fn verifier_missing(progress: &ProgressBar, host: &str) {
 pub(crate) fn fail(progress: &ProgressBar) {
     let failed = style("failed").for_stderr().red();
     progress.finish_with_message(format!("{failed}"));
+}
+
+/// Reports that live recovery failed and the host needs a reboot.
+pub(crate) fn recovery_required(progress: &ProgressBar) {
+    let message = style("live rollback failed; reboot through the machine console")
+        .for_stderr()
+        .red();
+    progress.finish_with_message(format!("{message}"));
 }
 
 /// Creates consistently styled progress bars for a group of hosts.

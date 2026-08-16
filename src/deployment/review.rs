@@ -106,8 +106,6 @@ pub(super) struct ReviewedHost {
     pub(super) host: Host,
     /// Identifies the system observed during review.
     pub(super) deployed: StorePath,
-    /// Identifies the desired system.
-    pub(super) expected: StorePath,
 }
 
 impl ReviewedHost {
@@ -179,12 +177,5 @@ pub(super) fn review(host: Host, deployed: StorePath, expected: StorePath) -> Re
         return ReviewOutcome::UpToDate(row);
     }
 
-    ReviewOutcome::OutOfDate(
-        row,
-        Box::new(ReviewedHost {
-            host,
-            deployed,
-            expected,
-        }),
-    )
+    ReviewOutcome::OutOfDate(row, Box::new(ReviewedHost { host, deployed }))
 }

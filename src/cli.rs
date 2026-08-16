@@ -79,7 +79,7 @@ pub(crate) struct DeployArgs {
     /// Skips configured flake verifiers.
     #[arg(short, long)]
     pub(crate) skip_verifier: bool,
-    /// Leaves a failed activation in place instead of rolling it back.
+    /// Leaves a failed test or verification in place instead of restoring it.
     #[arg(short = 'R', long)]
     pub(crate) no_rollback: bool,
     /// Retains this many system generations after deployment.

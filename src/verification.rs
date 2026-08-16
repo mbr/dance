@@ -116,7 +116,12 @@ impl Verifier {
     }
 
     /// Builds the verifier in the local Nix store.
-    async fn build(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
+    pub(crate) async fn build(
+        &self,
+        host: &Host,
+        logs: &RunLog,
+        progress: &ProgressBar,
+    ) -> Result<(), Error> {
         let label = format!("verify-{}-build", host.id());
         run_status(
             logs,
@@ -199,7 +204,7 @@ enum Outcome {
 
 /// Runs the verifier configured for one host.
 async fn verify_host(host: Host, logs: &RunLog, progress: &ProgressBar) -> Outcome {
-    status::set_phase(progress, host.id(), DeploymentPhase::Building);
+    status::set_phase(progress, host.id(), DeploymentPhase::BuildingVerifier);
     let verifier = match Verifier::discover(&host, logs, progress).await {
         Ok(Some(verifier)) => verifier,
         Ok(None) => {

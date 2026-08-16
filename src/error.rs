@@ -4,7 +4,7 @@ use std::{io, path::PathBuf, process::ExitStatus};
 
 use thiserror::Error;
 
-use crate::store_path::{StorePath, StorePathError};
+use crate::store_path::StorePathError;
 
 /// Describes failures encountered while deploying hosts.
 #[derive(Debug, Error)]
@@ -157,38 +157,10 @@ pub(crate) enum Error {
         #[source]
         source: StorePathError,
     },
-    /// Indicates that the reviewed target changed before activation.
-    #[error("host `{host}` changed after review: reviewed {reviewed}, currently {current}")]
-    TargetChanged {
-        /// Identifies the inventory host.
-        host: String,
-        /// Identifies the system observed during review.
-        reviewed: StorePath,
-        /// Identifies the system observed immediately before activation.
-        current: StorePath,
-    },
-    /// Indicates that activation did not select the expected system.
-    #[error("host `{host}` activated {current}, expected {expected}")]
-    ActivationMismatch {
-        /// Identifies the inventory host.
-        host: String,
-        /// Identifies the prepared system.
-        expected: StorePath,
-        /// Identifies the system observed after activation.
-        current: StorePath,
-    },
-    /// Indicates that rollback did not restore the reviewed system.
-    #[error("host `{host}` rolled back to {current}, expected {expected}")]
-    RollbackMismatch {
-        /// Identifies the inventory host.
-        host: String,
-        /// Identifies the reviewed system.
-        expected: StorePath,
-        /// Identifies the system observed after rollback.
-        current: StorePath,
-    },
-    /// Indicates that rollback did not complete while its watchdog remained armed.
-    #[error("rollback of host `{host}` remains incomplete after {trigger}: {rollback}")]
+    /// Indicates that live rollback failed and console recovery is required.
+    #[error(
+        "live rollback of host `{host}` failed after {trigger}: {rollback}; reboot it through the machine console"
+    )]
     RollbackIncomplete {
         /// Identifies the inventory host.
         host: String,

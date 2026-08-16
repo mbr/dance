@@ -196,7 +196,7 @@ fn confirm() -> Result<bool, Error> {
         .map_err(|source| Error::Confirmation { source })
 }
 
-/// Builds, prepares, and activates all reviewed hosts concurrently.
+/// Tests, verifies, and persistently activates all reviewed hosts concurrently.
 async fn activate(
     reviewed: Vec<ReviewedHost>,
     options: ActivationOptions,
@@ -207,8 +207,10 @@ async fn activate(
     let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
             let outcome = activation::activate(host, options, logs, progress).await;
-            if !matches!(&outcome, ActivationOutcome::Activated) {
-                status::fail(progress);
+            match &outcome {
+                ActivationOutcome::Activated => {}
+                ActivationOutcome::RecoveryRequired(_) => status::recovery_required(progress),
+                _ => status::fail(progress),
             }
             outcome
         },
@@ -217,29 +219,23 @@ async fn activate(
 
     let mut activated = 0;
     let mut failed = 0;
-    let mut verification_failed = 0;
     let mut rolled_back = 0;
-    let mut rollback_pending = 0;
+    let mut recovery_required = 0;
     let mut cleanup_failed = 0;
     let mut first_error = None;
     for outcome in outcomes {
         match outcome {
             ActivationOutcome::Activated => activated += 1,
-            ActivationOutcome::ActivationFailed(error) => {
+            ActivationOutcome::Failed(error) => {
                 failed += 1;
-                first_error.get_or_insert(error);
-            }
-            ActivationOutcome::VerificationFailed(error) => {
-                activated += 1;
-                verification_failed += 1;
                 first_error.get_or_insert(error);
             }
             ActivationOutcome::RolledBack(error) => {
                 rolled_back += 1;
                 first_error.get_or_insert(error);
             }
-            ActivationOutcome::RollbackPending(error) => {
-                rollback_pending += 1;
+            ActivationOutcome::RecoveryRequired(error) => {
+                recovery_required += 1;
                 first_error.get_or_insert(error);
             }
             ActivationOutcome::CleanupFailed(error) => {
@@ -250,14 +246,11 @@ async fn activate(
         }
     }
     let mut summary = format!("deployment: {activated} activated, {failed} failed");
-    if verification_failed != 0 {
-        summary.push_str(&format!(", {verification_failed} verification failed"));
-    }
     if rolled_back != 0 {
         summary.push_str(&format!(", {rolled_back} rolled back"));
     }
-    if rollback_pending != 0 {
-        summary.push_str(&format!(", {rollback_pending} rollback pending"));
+    if recovery_required != 0 {
+        summary.push_str(&format!(", {recovery_required} recovery required"));
     }
     if cleanup_failed != 0 {
         summary.push_str(&format!(", {cleanup_failed} cleanup failed"));
