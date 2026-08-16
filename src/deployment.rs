@@ -132,7 +132,7 @@ async fn collect(
     for ((host, deployed), expected) in hosts.into_iter().zip(deployed).zip(expected) {
         let failed_row = HostRow::failed(&host);
         match (deployed, expected) {
-            (Ok(deployed), Some(Ok(expected))) => match review::review(host, deployed, expected) {
+            (Ok(deployed), Some(Ok(expected))) => match review::review(host, deployed, &expected) {
                 ReviewOutcome::UpToDate(row) => {
                     rows.push(row);
                     up_to_date += 1;

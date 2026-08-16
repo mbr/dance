@@ -53,10 +53,9 @@ impl DeploymentPhase {
         let style = Style::new().for_stderr();
         match self {
             Self::Testing | Self::BuildingVerifier => style.blue(),
-            Self::RunningVerifier => style.yellow(),
+            Self::RunningVerifier | Self::CollectingGarbage => style.yellow(),
             Self::Switching => style.magenta(),
             Self::RollingBack => style.red(),
-            Self::CollectingGarbage => style.yellow(),
         }
     }
 }
@@ -82,7 +81,7 @@ pub(crate) fn review(host_count: usize, update: bool) -> Result<ProgressBar, Err
 }
 
 /// Displays a host identity and status using distinct styles.
-fn set_status(progress: &ProgressBar, host: &str, status: &str, status_style: Style) {
+fn set_status(progress: &ProgressBar, host: &str, status: &str, status_style: &Style) {
     let host = style(format!("{host:<12}")).for_stderr().bold();
     let status = status_style.apply_to(format!("{status:<16}"));
     progress.set_prefix(format!("{host} {status}"));
@@ -91,13 +90,13 @@ fn set_status(progress: &ProgressBar, host: &str, status: &str, status_style: St
 
 /// Displays a host identity and its current deployment phase.
 pub(crate) fn set_phase(progress: &ProgressBar, host: &str, phase: DeploymentPhase) {
-    set_status(progress, host, phase.label(), phase.style());
+    set_status(progress, host, phase.label(), &phase.style());
 }
 
 /// Finishes a host status line successfully.
 fn finish_with_status(progress: &ProgressBar, host: &str, status: &str) {
     let message = progress.message();
-    set_status(progress, host, status, Style::new().for_stderr().green());
+    set_status(progress, host, status, &Style::new().for_stderr().green());
     progress.finish_with_message(message);
 }
 
@@ -117,7 +116,7 @@ pub(crate) fn verifier_missing(progress: &ProgressBar, host: &str) {
         progress,
         host,
         "skipped",
-        Style::new().for_stderr().yellow(),
+        &Style::new().for_stderr().yellow(),
     );
     progress.finish_with_message("no verifier configured");
 }
@@ -161,7 +160,7 @@ impl ProgressDisplay {
             .map(|name| {
                 let progress = self.progress.add(ProgressBar::new_spinner());
                 progress.set_style(self.style.clone());
-                set_status(&progress, name, "", Style::new());
+                set_status(&progress, name, "", &Style::new());
                 progress.enable_steady_tick(SPINNER_INTERVAL);
                 progress
             })

@@ -162,10 +162,10 @@ pub(super) fn skip_expected(host: &Host, progress: &ProgressBar) {
 }
 
 /// Compares the deployed and expected systems for one host.
-pub(super) fn review(host: Host, deployed: StorePath, expected: StorePath) -> ReviewOutcome {
-    let row = HostRow::collected(&host, &deployed, &expected);
+pub(super) fn review(host: Host, deployed: StorePath, expected: &StorePath) -> ReviewOutcome {
+    let row = HostRow::collected(&host, &deployed, expected);
 
-    if deployed == expected {
+    if &deployed == expected {
         return ReviewOutcome::UpToDate(row);
     }
 

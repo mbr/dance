@@ -16,7 +16,7 @@ use crate::{
 };
 
 /// Limits how long a configured verifier may run.
-const TIMEOUT: Duration = Duration::from_secs(60);
+const TIMEOUT: Duration = Duration::from_mins(1);
 /// Evaluates an optional Dance verifier for one NixOS configuration.
 const EXPRESSION: &str = r#"
 let

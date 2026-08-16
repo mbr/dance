@@ -9,7 +9,7 @@ use crate::{
 };
 
 /// Limits routine SSH operations.
-pub(super) const SSH_TIMEOUT: Duration = Duration::from_secs(60);
+pub(super) const SSH_TIMEOUT: Duration = Duration::from_mins(1);
 
 /// Reads the system currently activated on a target.
 pub(super) async fn deployed_store_path(

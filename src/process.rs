@@ -4,6 +4,7 @@ use std::{
     ffi::OsString,
     io,
     process::Stdio,
+    string::FromUtf8Error,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -198,14 +199,6 @@ fn error_output(stderr: &[u8]) -> String {
     }
 }
 
-/// Selects whether successful standard output must be decoded.
-enum OutputMode {
-    /// Ignores standard output after logging and display.
-    Discard,
-    /// Returns standard output as UTF-8.
-    Utf8,
-}
-
 /// Configures and executes one logged subprocess.
 pub(crate) struct Invocation<'a> {
     /// Provides the command's diagnostic record.
@@ -260,16 +253,19 @@ impl<'a> Invocation<'a> {
 
     /// Runs the command and discards its successful standard output.
     pub(crate) async fn status(self) -> Result<(), Error> {
-        self.execute(OutputMode::Discard).await.map(drop)
+        self.execute(|_output| Ok(())).await
     }
 
     /// Runs the command and returns its successful standard output.
     pub(crate) async fn output(self) -> Result<String, Error> {
-        self.execute(OutputMode::Utf8).await
+        self.execute(String::from_utf8).await
     }
 
-    /// Executes the configured command.
-    async fn execute(self, output_mode: OutputMode) -> Result<String, Error> {
+    /// Executes the configured command and consumes successful standard output.
+    async fn execute<T>(
+        self,
+        consume: impl FnOnce(Vec<u8>) -> Result<T, FromUtf8Error>,
+    ) -> Result<T, Error> {
         let mut command_log = self
             .logs
             .command(self.label, self.program, self.arguments)?;
@@ -356,22 +352,16 @@ impl<'a> Invocation<'a> {
             });
         }
 
-        match output_mode {
-            OutputMode::Discard => {
+        match consume(output.stdout) {
+            Ok(output) => {
                 command_log.complete(status)?;
-                Ok(String::new())
+                Ok(output)
             }
-            OutputMode::Utf8 => match String::from_utf8(output.stdout) {
-                Ok(stdout) => {
-                    command_log.complete(status)?;
-                    Ok(stdout)
-                }
-                Err(source) => {
-                    let error = Error::CommandOutput { command, source };
-                    command_log.fail(&error.to_string())?;
-                    Err(error)
-                }
-            },
+            Err(source) => {
+                let error = Error::CommandOutput { command, source };
+                command_log.fail(&error.to_string())?;
+                Err(error)
+            }
         }
     }
 }
