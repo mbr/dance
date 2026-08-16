@@ -20,7 +20,7 @@ use tokio_util::io::{InspectReader, ReaderStream};
 
 use crate::{
     error::Error,
-    logs::{OutputLog, RunLog},
+    logs::{CommandLog, OutputLog, RunLog},
 };
 
 /// Limits how often subprocess output changes a progress message.
@@ -199,6 +199,12 @@ fn error_output(stderr: &[u8]) -> String {
     }
 }
 
+/// Records an execution failure before returning it.
+fn fail_command<T>(log: CommandLog<'_>, error: Error) -> Result<T, Error> {
+    log.fail(&error.to_string())?;
+    Err(error)
+}
+
 /// Configures and executes one logged subprocess.
 pub(crate) struct Invocation<'a> {
     /// Provides the command's diagnostic record.
@@ -301,12 +307,7 @@ impl<'a> Invocation<'a> {
         let mut process = match process.spawn() {
             Ok(process) => process,
             Err(source) => {
-                let error = Error::CommandSpawn {
-                    command: command.clone(),
-                    source,
-                };
-                command_log.fail(&error.to_string())?;
-                return Err(error);
+                return fail_command(command_log, Error::CommandSpawn { command, source });
             }
         };
         let stdout = process
@@ -335,12 +336,13 @@ impl<'a> Invocation<'a> {
             Some(limit) => match time::timeout(limit, completion).await {
                 Ok(completion) => completion,
                 Err(_elapsed) => {
-                    let error = Error::CommandTimedOut {
-                        command: command.clone(),
-                        seconds: limit.as_secs(),
-                    };
-                    command_log.fail(&error.to_string())?;
-                    return Err(error);
+                    return fail_command(
+                        command_log,
+                        Error::CommandTimedOut {
+                            command: command.clone(),
+                            seconds: limit.as_secs(),
+                        },
+                    );
                 }
             },
             None => completion.await,
@@ -348,20 +350,18 @@ impl<'a> Invocation<'a> {
         let status = match status {
             Ok(status) => status,
             Err(source) => {
-                let error = Error::CommandWait {
-                    command: command.clone(),
-                    source,
-                };
-                command_log.fail(&error.to_string())?;
-                return Err(error);
+                return fail_command(
+                    command_log,
+                    Error::CommandWait {
+                        command: command.clone(),
+                        source,
+                    },
+                );
             }
         };
         let output = match output {
             Ok(output) => output,
-            Err(error) => {
-                command_log.fail(&error.to_string())?;
-                return Err(error);
-            }
+            Err(error) => return fail_command(command_log, error),
         };
         if !status.success() {
             command_log.complete(status)?;
@@ -377,11 +377,7 @@ impl<'a> Invocation<'a> {
                 command_log.complete(status)?;
                 Ok(output)
             }
-            Err(source) => {
-                let error = Error::CommandOutput { command, source };
-                command_log.fail(&error.to_string())?;
-                Err(error)
-            }
+            Err(source) => fail_command(command_log, Error::CommandOutput { command, source }),
         }
     }
 }
