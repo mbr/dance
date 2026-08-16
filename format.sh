@@ -1,4 +1,5 @@
 #!/bin/sh
+set -eu
 
 #: Formats the source.
 #: Uses --config to override rustfmt settings without a nightly toolchain.
