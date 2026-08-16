@@ -58,13 +58,13 @@ nixos-rebuild test --use-substitutes --flake ../production#web-server --target-h
 nixos-rebuild switch --use-substitutes --flake ../production#web-server --target-host root@www.example.com
 ```
 
-After a verified deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup. Failed or rolled-back deployments skip cleanup.
+After a verified deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup.
 
-## Operational scope
+## Safety
 
-Dance assumes the inventory and selected flakes remain unchanged for the entire command. Review, test, verifier discovery, and switch are separate evaluations that intentionally rely on Nix caching; editing `flake.nix`, `flake.lock`, or other flake source files while Dance is running is undefined behavior.
+Editing `flake.nix`, `flake.lock`, or other flake source files while Dance is running is undefined behavior.
 
-Targets must be reachable over SSH, and deployments should have an out-of-band reboot path such as a hosting console. A test activation is non-persistent but not transactional: reboot restores the previous boot generation, but neither reboot nor live rollback undoes persistent side effects from activation scripts or services.
+Targets must be reachable over SSH, and deployments should have an out-of-band reboot path such as a hosting console.
 
 ## Verification
 
