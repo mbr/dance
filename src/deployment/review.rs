@@ -13,8 +13,6 @@ use crate::{error::Error, inventory::Host, logs::RunLog, store_path::StorePath};
 /// Describes a host's state during deployment review.
 #[derive(Clone, Copy)]
 enum HostStatus {
-    /// Information has not been collected yet.
-    Collecting,
     /// The deployed and desired systems match.
     UpToDate,
     /// The desired system needs to be activated.
@@ -26,7 +24,6 @@ enum HostStatus {
 impl Display for HostStatus {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
-            Self::Collecting => "collecting",
             Self::UpToDate => "up to date",
             Self::OutOfDate => "out of date",
             Self::Failed => "failed",
@@ -52,12 +49,12 @@ pub(super) struct HostRow {
 }
 
 impl HostRow {
-    /// Creates a row before system information has been collected.
-    pub(super) fn collecting(host: &Host) -> Self {
+    /// Creates a row for a host whose state could not be collected.
+    pub(super) fn failed(host: &Host) -> Self {
         Self {
             id: host.id().to_owned(),
-            flake: host.flake(),
-            status: HostStatus::Collecting,
+            flake: host.display_flake(),
+            status: HostStatus::Failed,
             change: "-".to_owned(),
         }
     }
@@ -67,7 +64,7 @@ impl HostRow {
         let up_to_date = deployed == expected;
         Self {
             id: host.id().to_owned(),
-            flake: host.flake(),
+            flake: host.display_flake(),
             status: if up_to_date {
                 HostStatus::UpToDate
             } else {
@@ -85,11 +82,6 @@ impl HostRow {
     pub(super) fn needs_activation(&self) -> bool {
         matches!(self.status, HostStatus::OutOfDate)
     }
-
-    /// Marks an information collection failure.
-    pub(super) fn fail(&mut self) {
-        self.status = HostStatus::Failed;
-    }
 }
 
 /// Describes the result of reviewing one host.
@@ -97,7 +89,7 @@ pub(super) enum ReviewOutcome {
     /// The host already runs the desired system.
     UpToDate(HostRow),
     /// The host needs to be tested, verified, and switched.
-    OutOfDate(HostRow, Box<ReviewedHost>),
+    OutOfDate(HostRow, ReviewedHost),
 }
 
 /// Contains the state collected for one outdated host.
@@ -177,5 +169,5 @@ pub(super) fn review(host: Host, deployed: StorePath, expected: StorePath) -> Re
         return ReviewOutcome::UpToDate(row);
     }
 
-    ReviewOutcome::OutOfDate(row, Box::new(ReviewedHost { host, deployed }))
+    ReviewOutcome::OutOfDate(row, ReviewedHost { host, deployed })
 }

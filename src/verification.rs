@@ -105,16 +105,6 @@ impl Verifier {
         parse(host.id(), &output)
     }
 
-    /// Returns the verifier flake installable.
-    pub(crate) fn installable(&self, host: &Host) -> String {
-        format!(
-            "{}#danceVerifiers.{}.{}",
-            host.flake_path().display(),
-            self.system,
-            host.flake_name()
-        )
-    }
-
     /// Builds the verifier in the local Nix store.
     async fn build(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
         let label = format!("verify-{}-build", host.id());
@@ -125,7 +115,7 @@ impl Verifier {
             &[
                 "build".into(),
                 "--no-link".into(),
-                self.installable(host).into(),
+                host.verifier_output(&self.system).into(),
             ],
             progress,
         )

@@ -53,7 +53,7 @@ pub(super) async fn expected_store_path(
         logs,
         &label,
         "nix",
-        &["eval".into(), "--raw".into(), flake_output(host).into()],
+        &["eval".into(), "--raw".into(), host.nixos_output().into()],
         progress,
     )
     .await?;
@@ -94,7 +94,7 @@ async fn rebuild(
             action.into(),
             "--use-substitutes".into(),
             "--flake".into(),
-            flake(host).into(),
+            host.flake().into(),
             "--target-host".into(),
             host.ssh_url().into(),
         ],
@@ -150,18 +150,4 @@ pub(super) async fn collect_garbage(
         progress,
     )
     .await
-}
-
-/// Returns the flake selector accepted by `nixos-rebuild`.
-fn flake(host: &Host) -> String {
-    format!("{}#{}", host.flake_path().display(), host.flake_name())
-}
-
-/// Returns the complete flake output used to evaluate a system.
-fn flake_output(host: &Host) -> String {
-    format!(
-        "{}#nixosConfigurations.{}.config.system.build.toplevel.outPath",
-        host.flake_path().display(),
-        host.flake_name()
-    )
 }

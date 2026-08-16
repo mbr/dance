@@ -98,7 +98,6 @@ async fn collect(
 ) -> Result<ReviewResult, Error> {
     let flakes = inventory.flake_groups();
     let hosts = inventory.into_iter().collect::<Vec<_>>();
-    let mut rows = hosts.iter().map(HostRow::collecting).collect::<Vec<_>>();
     let progress = status::review(hosts.len(), update_flakes)?;
 
     let deployed = join_all(
@@ -125,39 +124,32 @@ async fn collect(
     };
     let (deployed, (mut updates, expected)) = tokio::join!(deployed, local);
 
+    let mut rows = Vec::with_capacity(hosts.len());
     let mut outdated = Vec::new();
     let mut up_to_date = 0;
     let mut failed = 0;
     let mut first_error = updates.take_error();
-    for (((row, host), deployed), expected) in
-        rows.iter_mut().zip(hosts).zip(deployed).zip(expected)
-    {
-        let outcome = match deployed {
-            Err(error) => Err(error),
-            Ok(deployed) => match expected {
-                Some(Ok(expected)) => Ok(review::review(host, deployed, expected)),
-                Some(Err(error)) => Err(error),
-                None => {
-                    row.fail();
-                    failed += 1;
-                    continue;
+    for ((host, deployed), expected) in hosts.into_iter().zip(deployed).zip(expected) {
+        let failed_row = HostRow::failed(&host);
+        match (deployed, expected) {
+            (Ok(deployed), Some(Ok(expected))) => match review::review(host, deployed, expected) {
+                ReviewOutcome::UpToDate(row) => {
+                    rows.push(row);
+                    up_to_date += 1;
+                }
+                ReviewOutcome::OutOfDate(row, host) => {
+                    rows.push(row);
+                    outdated.push(host);
                 }
             },
-        };
-
-        match outcome {
-            Ok(ReviewOutcome::UpToDate(host_row)) => {
-                *row = host_row;
-                up_to_date += 1;
-            }
-            Ok(ReviewOutcome::OutOfDate(host_row, host)) => {
-                *row = host_row;
-                outdated.push(*host);
-            }
-            Err(error) => {
-                row.fail();
+            (Err(error), _) | (_, Some(Err(error))) => {
+                rows.push(failed_row);
                 failed += 1;
                 first_error.get_or_insert(error);
+            }
+            (_, None) => {
+                rows.push(failed_row);
+                failed += 1;
             }
         }
     }

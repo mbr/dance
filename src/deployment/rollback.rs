@@ -23,44 +23,52 @@ pub(super) async fn restore(
     logs: &RunLog,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
-    let previous = previous.to_string();
-    let command = match persistence {
-        Persistence::Runtime => format!(
-            "{}/bin/switch-to-configuration test",
-            shell_quote(&previous)
-        ),
-        Persistence::System => format!(
-            "{}/sw/bin/nix-env --profile /nix/var/nix/profiles/system --set {} && {}/bin/switch-to-configuration switch",
-            shell_quote(&previous),
-            shell_quote(&previous),
-            shell_quote(&previous),
-        ),
+    let action = match persistence {
+        Persistence::Runtime => "test",
+        Persistence::System => {
+            let label = format!("deploy-{}-rollback-profile", host.id());
+            run_status_bounded(
+                logs,
+                &label,
+                "ssh",
+                &[
+                    host.ssh_url().into(),
+                    previous
+                        .as_ref()
+                        .join("sw/bin/nix-env")
+                        .as_os_str()
+                        .to_owned(),
+                    "--profile".into(),
+                    "/nix/var/nix/profiles/system".into(),
+                    "--set".into(),
+                    previous.as_ref().as_os_str().to_owned(),
+                ],
+                &[],
+                SSH_TIMEOUT,
+                progress,
+            )
+            .await?;
+            "switch"
+        }
     };
-    let label = format!("deploy-{}-rollback", host.id());
+
+    let label = format!("deploy-{}-rollback-activate", host.id());
     run_status_bounded(
         logs,
         &label,
         "ssh",
-        &[host.ssh_url().into(), command.into()],
+        &[
+            host.ssh_url().into(),
+            previous
+                .as_ref()
+                .join("bin/switch-to-configuration")
+                .as_os_str()
+                .to_owned(),
+            action.into(),
+        ],
         &[],
         SSH_TIMEOUT,
         progress,
     )
     .await
-}
-
-/// Quotes one value for a POSIX-compatible remote shell.
-fn shell_quote(value: &str) -> String {
-    format!("'{}'", value.replace('\'', "'\"'\"'"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::shell_quote;
-
-    /// Checks that values remain one argument in remote shell commands.
-    #[test]
-    fn quotes_remote_shell_values() {
-        assert_eq!(shell_quote("one'two"), "'one'\"'\"'two'");
-    }
 }

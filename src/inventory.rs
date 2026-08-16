@@ -115,14 +115,37 @@ impl Host {
         &self.flake_name
     }
 
-    /// Returns the display form of the flake selector.
-    pub(crate) fn flake(&self) -> String {
+    /// Returns a concise flake selector for user-facing output.
+    pub(crate) fn display_flake(&self) -> String {
         let name = self
             .flake_path
             .file_name()
             .map_or_else(|| self.flake_path.as_os_str(), |name| name)
             .to_string_lossy();
         format!("{name}#{}", self.flake_name)
+    }
+
+    /// Returns the flake selector accepted by `nixos-rebuild`.
+    pub(crate) fn flake(&self) -> String {
+        format!("{}#{}", self.flake_path.display(), self.flake_name)
+    }
+
+    /// Returns the flake output used to evaluate the desired system.
+    pub(crate) fn nixos_output(&self) -> String {
+        format!(
+            "{}#nixosConfigurations.{}.config.system.build.toplevel.outPath",
+            self.flake_path.display(),
+            self.flake_name
+        )
+    }
+
+    /// Returns the verifier output for a deployment-machine system.
+    pub(crate) fn verifier_output(&self, system: &str) -> String {
+        format!(
+            "{}#danceVerifiers.{system}.{}",
+            self.flake_path.display(),
+            self.flake_name
+        )
     }
 
     /// Returns the root SSH destination.
