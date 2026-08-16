@@ -26,25 +26,16 @@ pub(super) async fn restore(
     let action = match persistence {
         Persistence::Runtime => "test",
         Persistence::System => {
-            let label = format!("deploy-{}-rollback-profile", host.id());
             Invocation::new(
                 logs,
-                &label,
+                format!("deploy-{}-rollback-profile", host.id()),
                 "ssh",
-                &[
-                    host.ssh_url().into(),
-                    previous
-                        .as_ref()
-                        .join("sw/bin/nix-env")
-                        .as_os_str()
-                        .to_owned(),
-                    "--profile".into(),
-                    "/nix/var/nix/profiles/system".into(),
-                    "--set".into(),
-                    previous.as_ref().as_os_str().to_owned(),
-                ],
                 progress,
             )
+            .argument(host.ssh_url())
+            .argument(previous.as_ref().join("sw/bin/nix-env"))
+            .arguments(["--profile", "/nix/var/nix/profiles/system", "--set"])
+            .argument(previous.as_ref())
             .timeout(SSH_TIMEOUT)
             .status()
             .await?;
@@ -52,22 +43,15 @@ pub(super) async fn restore(
         }
     };
 
-    let label = format!("deploy-{}-rollback-activate", host.id());
     Invocation::new(
         logs,
-        &label,
+        format!("deploy-{}-rollback-activate", host.id()),
         "ssh",
-        &[
-            host.ssh_url().into(),
-            previous
-                .as_ref()
-                .join("bin/switch-to-configuration")
-                .as_os_str()
-                .to_owned(),
-            action.into(),
-        ],
         progress,
     )
+    .argument(host.ssh_url())
+    .argument(previous.as_ref().join("bin/switch-to-configuration"))
+    .argument(action)
     .timeout(SSH_TIMEOUT)
     .status()
     .await

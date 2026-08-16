@@ -204,13 +204,13 @@ pub(crate) struct Invocation<'a> {
     /// Provides the command's diagnostic record.
     logs: &'a RunLog,
     /// Describes the command's role in the workflow.
-    label: &'a str,
+    label: String,
     /// Identifies the executable.
-    program: &'a str,
+    program: OsString,
     /// Contains the executable arguments.
-    arguments: &'a [OsString],
+    arguments: Vec<OsString>,
     /// Contains environment additions for the child process.
-    environment: &'a [(&'a str, OsString)],
+    environment: Vec<(OsString, OsString)>,
     /// Limits command execution when configured.
     timeout: Option<Duration>,
     /// Receives live command output.
@@ -218,29 +218,49 @@ pub(crate) struct Invocation<'a> {
 }
 
 impl<'a> Invocation<'a> {
-    /// Creates an unbounded command without environment additions.
+    /// Creates an unbounded command without arguments or environment additions.
     pub(crate) fn new(
         logs: &'a RunLog,
-        label: &'a str,
-        program: &'a str,
-        arguments: &'a [OsString],
+        label: impl Into<String>,
+        program: impl Into<OsString>,
         progress: &'a ProgressBar,
     ) -> Self {
         Self {
             logs,
-            label,
-            program,
-            arguments,
-            environment: &[],
+            label: label.into(),
+            program: program.into(),
+            arguments: Vec::new(),
+            environment: Vec::new(),
             timeout: None,
             progress,
         }
     }
 
-    /// Adds environment variables to the child process.
+    /// Adds one argument to the child process.
     #[must_use]
-    pub(crate) fn environment(mut self, environment: &'a [(&'a str, OsString)]) -> Self {
-        self.environment = environment;
+    pub(crate) fn argument(mut self, argument: impl Into<OsString>) -> Self {
+        self.arguments.push(argument.into());
+        self
+    }
+
+    /// Adds arguments to the child process.
+    #[must_use]
+    pub(crate) fn arguments(
+        mut self,
+        arguments: impl IntoIterator<Item = impl Into<OsString>>,
+    ) -> Self {
+        self.arguments.extend(arguments.into_iter().map(Into::into));
+        self
+    }
+
+    /// Adds an environment variable to the child process.
+    #[must_use]
+    pub(crate) fn environment(
+        mut self,
+        name: impl Into<OsString>,
+        value: impl Into<OsString>,
+    ) -> Self {
+        self.environment.push((name.into(), value.into()));
         self
     }
 
@@ -268,12 +288,12 @@ impl<'a> Invocation<'a> {
     ) -> Result<T, Error> {
         let mut command_log = self
             .logs
-            .command(self.label, self.program, self.arguments)?;
+            .command(&self.label, &self.program, &self.arguments)?;
         let (stdout_log, stderr_log) = command_log.take_outputs();
-        let mut process = Command::new(self.program);
+        let mut process = Command::new(&self.program);
         process
-            .args(self.arguments)
-            .envs(self.environment.iter().cloned())
+            .args(&self.arguments)
+            .envs(self.environment.iter().map(|(name, value)| (name, value)))
             .kill_on_drop(true)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -368,7 +388,7 @@ impl<'a> Invocation<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::{ffi::OsString, fs, path::Path, time::Duration};
+    use std::{fs, path::Path, time::Duration};
 
     use indicatif::ProgressBar;
     use tempfile::tempdir;
@@ -418,16 +438,11 @@ mod tests {
         )
         .expect("disabled logs should start");
         let progress = ProgressBar::hidden();
-        let result = Invocation::new(
-            &logs,
-            "timeout",
-            "sh",
-            &[OsString::from("-c"), OsString::from("sleep 10")],
-            &progress,
-        )
-        .timeout(Duration::from_millis(20))
-        .status()
-        .await;
+        let result = Invocation::new(&logs, "timeout", "sh", &progress)
+            .arguments(["-c", "sleep 10"])
+            .timeout(Duration::from_millis(20))
+            .status()
+            .await;
 
         assert!(matches!(result, Err(Error::CommandTimedOut { .. })));
         logs.finish(Some("timed out"))
@@ -445,25 +460,15 @@ mod tests {
         )
         .expect("run log should start");
         let progress = ProgressBar::hidden();
-        Invocation::new(
-            &logs,
-            "ignored-output",
-            "sh",
-            &[OsString::from("-c"), OsString::from("printf '\\377'")],
-            &progress,
-        )
-        .status()
-        .await
-        .expect("discarded output should not require UTF-8");
-        let result = Invocation::new(
-            &logs,
-            "invalid-output",
-            "sh",
-            &[OsString::from("-c"), OsString::from("printf '\\377'")],
-            &progress,
-        )
-        .output()
-        .await;
+        Invocation::new(&logs, "ignored-output", "sh", &progress)
+            .arguments(["-c", "printf '\\377'"])
+            .status()
+            .await
+            .expect("discarded output should not require UTF-8");
+        let result = Invocation::new(&logs, "invalid-output", "sh", &progress)
+            .arguments(["-c", "printf '\\377'"])
+            .output()
+            .await;
         let error = result.expect_err("non-UTF-8 output should fail");
         assert!(matches!(error, Error::CommandOutput { .. }));
         let directory = logs

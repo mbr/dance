@@ -1,6 +1,6 @@
 //! Discovery, building, and execution of flake-provided verifiers.
 
-use std::{ffi::OsString, path::PathBuf, time::Duration};
+use std::{path::PathBuf, time::Duration};
 
 use futures::future::join_all;
 use indicatif::ProgressBar;
@@ -60,20 +60,14 @@ impl Verifier {
         logs: &RunLog,
         progress: &ProgressBar,
     ) -> Result<Option<Self>, Error> {
-        let metadata_label = format!("verify-{}-flake-metadata", host.id());
         let metadata = Invocation::new(
             logs,
-            &metadata_label,
+            format!("verify-{}-flake-metadata", host.id()),
             "nix",
-            &[
-                "flake".into(),
-                "metadata".into(),
-                "--json".into(),
-                "--no-write-lock-file".into(),
-                host.flake_path().as_os_str().to_owned(),
-            ],
             progress,
         )
+        .arguments(["flake", "metadata", "--json", "--no-write-lock-file"])
+        .argument(host.flake_path())
         .output()
         .await?;
         let metadata: FlakeMetadata =
@@ -88,20 +82,14 @@ impl Verifier {
         let expression = format!(
             "let flakeReference = {flake_reference}; flakeName = {flake_name}; in ({EXPRESSION})"
         );
-        let label = format!("verify-{}-evaluate", host.id());
         let output = Invocation::new(
             logs,
-            &label,
+            format!("verify-{}-evaluate", host.id()),
             "nix",
-            &[
-                "eval".into(),
-                "--json".into(),
-                "--impure".into(),
-                "--expr".into(),
-                expression.into(),
-            ],
             progress,
         )
+        .arguments(["eval", "--json", "--impure", "--expr"])
+        .argument(expression)
         .output()
         .await?;
         parse(host.id(), &output)
@@ -109,35 +97,26 @@ impl Verifier {
 
     /// Builds the verifier in the local Nix store.
     async fn build(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
-        let label = format!("verify-{}-build", host.id());
-        Invocation::new(
-            logs,
-            &label,
-            "nix",
-            &[
-                "build".into(),
-                "--no-link".into(),
-                host.verifier_output(&self.system).into(),
-            ],
-            progress,
-        )
-        .status()
-        .await
+        Invocation::new(logs, format!("verify-{}-build", host.id()), "nix", progress)
+            .arguments(["build", "--no-link"])
+            .argument(host.verifier_output(&self.system))
+            .status()
+            .await
     }
 
     /// Runs the built verifier on the deployment machine.
     async fn run(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
-        let label = format!("verify-{}-run", host.id());
-        let environment = [
-            ("DANCE_HOST_ID", OsString::from(host.id())),
-            ("DANCE_SSH_TARGET", OsString::from(host.ssh_url())),
-        ];
-        let executable = self.executable();
-        Invocation::new(logs, &label, &executable, &[], progress)
-            .environment(&environment)
-            .timeout(TIMEOUT)
-            .status()
-            .await
+        Invocation::new(
+            logs,
+            format!("verify-{}-run", host.id()),
+            self.executable(),
+            progress,
+        )
+        .environment("DANCE_HOST_ID", host.id())
+        .environment("DANCE_SSH_TARGET", host.ssh_url())
+        .timeout(TIMEOUT)
+        .status()
+        .await
     }
 
     /// Returns the realized verifier executable.

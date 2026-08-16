@@ -127,7 +127,7 @@ impl RunLog {
     pub(crate) fn command<'a>(
         &'a self,
         label: &str,
-        program: &str,
+        program: impl AsRef<OsStr>,
         arguments: &[OsString],
     ) -> Result<CommandLog<'a>, Error> {
         let started = Instant::now();
@@ -155,7 +155,7 @@ impl RunLog {
         let stderr_log = open_secure(&stderr)?;
 
         let mut command_arguments = Vec::with_capacity(arguments.len() + 1);
-        command_arguments.push(program.to_owned());
+        command_arguments.push(display_os(program));
         command_arguments.extend(arguments.iter().map(display_os));
         manifest.start_command(
             id,

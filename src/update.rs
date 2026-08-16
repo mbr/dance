@@ -38,21 +38,11 @@ async fn flake(
     logs: &RunLog,
     progress: &ProgressBar,
 ) -> (PathBuf, Result<(), Error>) {
-    let label = format!("update-{}", path.display());
-    let result = Invocation::new(
-        logs,
-        &label,
-        "nix",
-        &[
-            "flake".into(),
-            "update".into(),
-            "--flake".into(),
-            path.as_os_str().to_owned(),
-        ],
-        progress,
-    )
-    .status()
-    .await;
+    let result = Invocation::new(logs, format!("update-{}", path.display()), "nix", progress)
+        .arguments(["flake", "update", "--flake"])
+        .argument(path.as_os_str())
+        .status()
+        .await;
     let status = if result.is_ok() { "updated" } else { "failed" };
     progress.set_message(format!("{}: inputs {status}", path.display()));
     progress.inc(u64::try_from(host_count).expect("host count should fit in u64"));
