@@ -7,9 +7,9 @@ At its core, Dance takes servers defined in local Nix flakes and deploys them ov
 - An inventory keeps short server IDs and SSH addresses in one place.
 - Review and deployment run in parallel across multiple servers.
 - `--update` updates the inputs of all selected flakes during review.
-- Systems and optional verifiers are built locally; servers fetch available substitutes and receive the remaining system paths over SSH.
-- Flake verifiers can check a deployment from the outside or inspect it over SSH.
-- A target-side rollback watchdog restores the previous system when activation or verification fails.
+- `nixos-rebuild test` builds, uploads, and temporarily activates each approved system before it becomes a boot generation.
+- Flake verifiers are built after the test activation and can check it externally or over SSH.
+- Verified systems are made persistent with `nixos-rebuild switch`; failed tests or verifiers trigger a best-effort live rollback.
 - No separate deployment state is kept: Dance checks `/run/current-system` to determine whether an update is needed.
 
 ## Usage
@@ -48,15 +48,23 @@ dance deploy www          # Deploy only the www inventory entry
 dance deploy --update www # Update its flake before deploying
 ```
 
-Dance asks for confirmation, builds the system and verifier together, dry-activates, and verifies each target. Failed activation or verification rolls back through a target-side watchdog.
+Dance asks for confirmation, temporarily activates each system with `nixos-rebuild test`, builds and runs its verifier, then makes a successful test persistent with `nixos-rebuild switch`. A failed test or verifier causes Dance to reactivate the system observed during review. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
 
-A deployment is roughly equivalent to:
+A deployment centers on these two commands:
 
 ```console
+nixos-rebuild test --use-substitutes --flake ../production#web-server --target-host root@www.example.com
+# Run the optional verifier.
 nixos-rebuild switch --use-substitutes --flake ../production#web-server --target-host root@www.example.com
 ```
 
 After a verified deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup. Failed or rolled-back deployments skip cleanup.
+
+## Operational scope
+
+Dance assumes the inventory and selected flakes remain unchanged for the entire command. Review, test, verifier discovery, and switch are separate evaluations that intentionally rely on Nix caching; editing `flake.nix`, `flake.lock`, or other flake source files while Dance is running is undefined behavior.
+
+Targets must be reachable over SSH, and deployments should have an out-of-band reboot path such as a hosting console. A test activation is non-persistent but not transactional: reboot restores the previous boot generation, but neither reboot nor live rollback undoes persistent side effects from activation scripts or services.
 
 ## Verification
 
