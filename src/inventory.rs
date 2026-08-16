@@ -2,6 +2,7 @@
 
 use std::{
     collections::HashSet,
+    ffi::OsString,
     fs,
     path::{Path, PathBuf},
 };
@@ -126,26 +127,29 @@ impl Host {
     }
 
     /// Returns the flake selector accepted by `nixos-rebuild`.
-    pub(crate) fn flake(&self) -> String {
-        format!("{}#{}", self.flake_path.display(), self.flake_name)
+    pub(crate) fn flake(&self) -> OsString {
+        self.flake_output(&self.flake_name)
     }
 
     /// Returns the flake output used to evaluate the desired system.
-    pub(crate) fn nixos_output(&self) -> String {
-        format!(
-            "{}#nixosConfigurations.{}.config.system.build.toplevel.outPath",
-            self.flake_path.display(),
+    pub(crate) fn nixos_output(&self) -> OsString {
+        self.flake_output(&format!(
+            "nixosConfigurations.{}.config.system.build.toplevel.outPath",
             self.flake_name
-        )
+        ))
     }
 
     /// Returns the verifier output for a deployment-machine system.
-    pub(crate) fn verifier_output(&self, system: &str) -> String {
-        format!(
-            "{}#danceVerifiers.{system}.{}",
-            self.flake_path.display(),
-            self.flake_name
-        )
+    pub(crate) fn verifier_output(&self, system: &str) -> OsString {
+        self.flake_output(&format!("danceVerifiers.{system}.{}", self.flake_name))
+    }
+
+    /// Appends an output attribute to the host's flake path.
+    fn flake_output(&self, output: &str) -> OsString {
+        let mut selector = self.flake_path.as_os_str().to_owned();
+        selector.push("#");
+        selector.push(output);
+        selector
     }
 
     /// Returns the root SSH destination.

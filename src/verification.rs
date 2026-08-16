@@ -72,7 +72,7 @@ impl Verifier {
         .await?;
         let metadata: FlakeMetadata =
             serde_json::from_str(&metadata).map_err(|source| Error::ParseFlakeMetadata {
-                path: PathBuf::from(host.flake_path()),
+                path: host.flake_path().to_path_buf(),
                 source,
             })?;
         let flake_reference = serde_json::to_string(&metadata.resolved_url)
@@ -120,13 +120,8 @@ impl Verifier {
     }
 
     /// Returns the realized verifier executable.
-    fn executable(&self) -> String {
-        self.output
-            .as_ref()
-            .join("bin")
-            .join(&self.main_program)
-            .to_string_lossy()
-            .into_owned()
+    fn executable(&self) -> PathBuf {
+        self.output.as_ref().join("bin").join(&self.main_program)
     }
 }
 
@@ -261,6 +256,8 @@ fn parse(host: &str, output: &str) -> Result<Option<Verifier>, Error> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::parse;
 
     /// Checks the verifier metadata contract used with Nix evaluation.
@@ -278,7 +275,7 @@ mod tests {
         .expect("verifier should be present");
         assert_eq!(
             verifier.executable(),
-            "/nix/store/11111111111111111111111111111111-verifier/bin/verify-www"
+            PathBuf::from("/nix/store/11111111111111111111111111111111-verifier/bin/verify-www")
         );
         assert!(
             parse("www", "null")
