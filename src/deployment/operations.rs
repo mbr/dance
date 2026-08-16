@@ -124,6 +124,7 @@ pub(super) async fn activate(
         "nixos-rebuild",
         &[
             "switch".into(),
+            "--no-reexec".into(),
             "--use-substitutes".into(),
             "--store-path".into(),
             store_path.as_ref().as_os_str().to_owned(),
