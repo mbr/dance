@@ -2,6 +2,8 @@
 
 mod manifest;
 
+#[cfg(unix)]
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
@@ -322,11 +324,15 @@ fn elapsed_milliseconds(started: Instant) -> u64 {
 /// Creates a uniquely named run directory.
 fn create_run_directory(base: &Path) -> Result<PathBuf, Error> {
     let path = base.join(Uuid::now_v7().to_string());
-    fs::create_dir(&path).map_err(|source| Error::CreateLogDirectory {
-        path: path.clone(),
-        source,
-    })?;
-    secure_directory(&path)?;
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    builder.mode(0o700);
+    builder
+        .create(&path)
+        .map_err(|source| Error::CreateLogDirectory {
+            path: path.clone(),
+            source,
+        })?;
     Ok(path)
 }
 
@@ -355,11 +361,7 @@ fn open_secure(path: &Path) -> Result<File, Error> {
     let mut options = OpenOptions::new();
     options.create(true).truncate(true).write(true);
     #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-
-        options.mode(0o600);
-    }
+    options.mode(0o600);
     options.open(path).map_err(|source| Error::WriteLog {
         path: path.to_path_buf(),
         source,
@@ -373,22 +375,6 @@ fn write_secure(path: &Path, contents: &[u8]) -> Result<(), Error> {
         path: path.to_path_buf(),
         source,
     })
-}
-
-/// Restricts access to a run directory.
-fn secure_directory(path: &Path) -> Result<(), Error> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-
-        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|source| {
-            Error::CreateLogDirectory {
-                path: path.to_path_buf(),
-                source,
-            }
-        })?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]
