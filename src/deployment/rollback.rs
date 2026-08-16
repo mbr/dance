@@ -4,7 +4,7 @@ use indicatif::ProgressBar;
 
 use super::operations::SSH_TIMEOUT;
 use crate::{
-    error::Error, inventory::Host, logs::RunLog, process::run_status_bounded, store_path::StorePath,
+    error::Error, inventory::Host, logs::RunLog, process::Invocation, store_path::StorePath,
 };
 
 /// Selects whether restoration also repairs the persistent system profile.
@@ -27,7 +27,7 @@ pub(super) async fn restore(
         Persistence::Runtime => "test",
         Persistence::System => {
             let label = format!("deploy-{}-rollback-profile", host.id());
-            run_status_bounded(
+            Invocation::new(
                 logs,
                 &label,
                 "ssh",
@@ -43,17 +43,17 @@ pub(super) async fn restore(
                     "--set".into(),
                     previous.as_ref().as_os_str().to_owned(),
                 ],
-                &[],
-                SSH_TIMEOUT,
                 progress,
             )
+            .timeout(SSH_TIMEOUT)
+            .status()
             .await?;
             "switch"
         }
     };
 
     let label = format!("deploy-{}-rollback-activate", host.id());
-    run_status_bounded(
+    Invocation::new(
         logs,
         &label,
         "ssh",
@@ -66,9 +66,9 @@ pub(super) async fn restore(
                 .to_owned(),
             action.into(),
         ],
-        &[],
-        SSH_TIMEOUT,
         progress,
     )
+    .timeout(SSH_TIMEOUT)
+    .status()
     .await
 }

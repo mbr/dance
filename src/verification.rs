@@ -10,7 +10,7 @@ use crate::{
     error::Error,
     inventory::{Host, Inventory},
     logs::RunLog,
-    process::{run, run_status, run_status_bounded},
+    process::Invocation,
     status::{self, DeploymentPhase, ProgressDisplay},
     store_path::StorePath,
 };
@@ -61,7 +61,7 @@ impl Verifier {
         progress: &ProgressBar,
     ) -> Result<Option<Self>, Error> {
         let metadata_label = format!("verify-{}-flake-metadata", host.id());
-        let metadata = run(
+        let metadata = Invocation::new(
             logs,
             &metadata_label,
             "nix",
@@ -74,6 +74,7 @@ impl Verifier {
             ],
             progress,
         )
+        .output()
         .await?;
         let metadata: FlakeMetadata =
             serde_json::from_str(&metadata).map_err(|source| Error::ParseFlakeMetadata {
@@ -88,7 +89,7 @@ impl Verifier {
             "let flakeReference = {flake_reference}; flakeName = {flake_name}; in ({EXPRESSION})"
         );
         let label = format!("verify-{}-evaluate", host.id());
-        let output = run(
+        let output = Invocation::new(
             logs,
             &label,
             "nix",
@@ -101,6 +102,7 @@ impl Verifier {
             ],
             progress,
         )
+        .output()
         .await?;
         parse(host.id(), &output)
     }
@@ -108,7 +110,7 @@ impl Verifier {
     /// Builds the verifier in the local Nix store.
     async fn build(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
         let label = format!("verify-{}-build", host.id());
-        run_status(
+        Invocation::new(
             logs,
             &label,
             "nix",
@@ -119,6 +121,7 @@ impl Verifier {
             ],
             progress,
         )
+        .status()
         .await
     }
 
@@ -129,16 +132,12 @@ impl Verifier {
             ("DANCE_HOST_ID", OsString::from(host.id())),
             ("DANCE_SSH_TARGET", OsString::from(host.ssh_url())),
         ];
-        run_status_bounded(
-            logs,
-            &label,
-            &self.executable(),
-            &[],
-            &environment,
-            TIMEOUT,
-            progress,
-        )
-        .await
+        let executable = self.executable();
+        Invocation::new(logs, &label, &executable, &[], progress)
+            .environment(&environment)
+            .timeout(TIMEOUT)
+            .status()
+            .await
     }
 
     /// Returns the realized verifier executable.

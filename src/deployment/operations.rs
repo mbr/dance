@@ -5,11 +5,7 @@ use std::{num::NonZeroU32, time::Duration};
 use indicatif::ProgressBar;
 
 use crate::{
-    error::Error,
-    inventory::Host,
-    logs::RunLog,
-    process::{run, run_bounded, run_status},
-    store_path::StorePath,
+    error::Error, inventory::Host, logs::RunLog, process::Invocation, store_path::StorePath,
 };
 
 /// Limits routine SSH operations.
@@ -23,7 +19,7 @@ pub(super) async fn deployed_store_path(
     progress: &ProgressBar,
 ) -> Result<StorePath, Error> {
     let label = format!("{phase}-{}-remote", host.id());
-    let output = run_bounded(
+    let output = Invocation::new(
         logs,
         &label,
         "ssh",
@@ -31,9 +27,10 @@ pub(super) async fn deployed_store_path(
             host.ssh_url().into(),
             "readlink -f /run/current-system".into(),
         ],
-        SSH_TIMEOUT,
         progress,
     )
+    .timeout(SSH_TIMEOUT)
+    .output()
     .await?;
     let value = output.trim();
     value.parse().map_err(|source| Error::InvalidStorePath {
@@ -49,13 +46,14 @@ pub(super) async fn expected_store_path(
     progress: &ProgressBar,
 ) -> Result<StorePath, Error> {
     let label = format!("review-{}-local", host.id());
-    let output = run(
+    let output = Invocation::new(
         logs,
         &label,
         "nix",
         &["eval".into(), "--raw".into(), host.nixos_output().into()],
         progress,
     )
+    .output()
     .await?;
     let value = output.trim();
     value.parse().map_err(|source| Error::InvalidStorePath {
@@ -86,7 +84,7 @@ async fn rebuild(
     progress: &ProgressBar,
 ) -> Result<(), Error> {
     let label = format!("deploy-{}-{action}", host.id());
-    run_status(
+    Invocation::new(
         logs,
         &label,
         "nixos-rebuild",
@@ -100,6 +98,7 @@ async fn rebuild(
         ],
         progress,
     )
+    .status()
     .await
 }
 
@@ -111,7 +110,7 @@ pub(super) async fn collect_garbage(
     progress: &ProgressBar,
 ) -> Result<(), Error> {
     let label = format!("deploy-{}-prune-generations", host.id());
-    run_status(
+    Invocation::new(
         logs,
         &label,
         "ssh",
@@ -125,10 +124,11 @@ pub(super) async fn collect_garbage(
         ],
         progress,
     )
+    .status()
     .await?;
 
     let label = format!("deploy-{}-refresh-bootloader", host.id());
-    run_status(
+    Invocation::new(
         logs,
         &label,
         "ssh",
@@ -139,15 +139,17 @@ pub(super) async fn collect_garbage(
         ],
         progress,
     )
+    .status()
     .await?;
 
     let label = format!("deploy-{}-collect-garbage", host.id());
-    run_status(
+    Invocation::new(
         logs,
         &label,
         "ssh",
         &[host.ssh_url().into(), "nix-store".into(), "--gc".into()],
         progress,
     )
+    .status()
     .await
 }

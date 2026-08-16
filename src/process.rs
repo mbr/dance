@@ -198,170 +198,180 @@ fn error_output(stderr: &[u8]) -> String {
     }
 }
 
-/// Runs a subprocess without returning its standard output.
-pub(crate) async fn run_status(
-    logs: &RunLog,
-    label: &str,
-    program: &str,
-    arguments: &[OsString],
-    progress: &ProgressBar,
-) -> Result<(), Error> {
-    run_command(logs, label, program, arguments, &[], None, progress)
-        .await
-        .map(drop)
+/// Selects whether successful standard output must be decoded.
+enum OutputMode {
+    /// Ignores standard output after logging and display.
+    Discard,
+    /// Returns standard output as UTF-8.
+    Utf8,
 }
 
-/// Runs a bounded subprocess without returning its standard output.
-pub(crate) async fn run_status_bounded(
-    logs: &RunLog,
-    label: &str,
-    program: &str,
-    arguments: &[OsString],
-    environment: &[(&str, OsString)],
-    timeout: Duration,
-    progress: &ProgressBar,
-) -> Result<(), Error> {
-    run_command(
-        logs,
-        label,
-        program,
-        arguments,
-        environment,
-        Some(timeout),
-        progress,
-    )
-    .await
-    .map(drop)
-}
-
-/// Runs a bounded subprocess and captures its standard output.
-pub(crate) async fn run_bounded(
-    logs: &RunLog,
-    label: &str,
-    program: &str,
-    arguments: &[OsString],
-    timeout: Duration,
-    progress: &ProgressBar,
-) -> Result<String, Error> {
-    run_command(
-        logs,
-        label,
-        program,
-        arguments,
-        &[],
-        Some(timeout),
-        progress,
-    )
-    .await
-}
-
-/// Runs a subprocess and captures its standard output.
-pub(crate) async fn run(
-    logs: &RunLog,
-    label: &str,
-    program: &str,
-    arguments: &[OsString],
-    progress: &ProgressBar,
-) -> Result<String, Error> {
-    run_command(logs, label, program, arguments, &[], None, progress).await
-}
-
-/// Runs one configured subprocess and captures its standard output.
-async fn run_command(
-    logs: &RunLog,
-    label: &str,
-    program: &str,
-    arguments: &[OsString],
-    environment: &[(&str, OsString)],
+/// Configures and executes one logged subprocess.
+pub(crate) struct Invocation<'a> {
+    /// Provides the command's diagnostic record.
+    logs: &'a RunLog,
+    /// Describes the command's role in the workflow.
+    label: &'a str,
+    /// Identifies the executable.
+    program: &'a str,
+    /// Contains the executable arguments.
+    arguments: &'a [OsString],
+    /// Contains environment additions for the child process.
+    environment: &'a [(&'a str, OsString)],
+    /// Limits command execution when configured.
     timeout: Option<Duration>,
-    progress: &ProgressBar,
-) -> Result<String, Error> {
-    let mut command_log = logs.command(label, program, arguments)?;
-    let (stdout_log, stderr_log) = command_log.take_outputs();
-    let mut process = Command::new(program);
-    process
-        .args(arguments)
-        .envs(environment.iter().cloned())
-        .kill_on_drop(true)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let command = format!("{:?}", process.as_std());
-    let mut process = match process.spawn() {
-        Ok(process) => process,
-        Err(source) => {
-            let error = Error::CommandSpawn {
-                command: command.clone(),
-                source,
-            };
-            command_log.fail(&error.to_string())?;
-            return Err(error);
-        }
-    };
-    let stdout = process
-        .stdout
-        .take()
-        .expect("piped standard output should be available");
-    let stderr = process
-        .stderr
-        .take()
-        .expect("piped standard error should be available");
+    /// Receives live command output.
+    progress: &'a ProgressBar,
+}
 
-    let completion = async {
-        tokio::join!(
-            process.wait(),
-            capture_output(stdout, stderr, stdout_log, stderr_log, &command, progress,)
-        )
-    };
-    let (status, output) = match timeout {
-        Some(limit) => match time::timeout(limit, completion).await {
-            Ok(completion) => completion,
-            Err(_elapsed) => {
-                let error = Error::CommandTimedOut {
+impl<'a> Invocation<'a> {
+    /// Creates an unbounded command without environment additions.
+    pub(crate) fn new(
+        logs: &'a RunLog,
+        label: &'a str,
+        program: &'a str,
+        arguments: &'a [OsString],
+        progress: &'a ProgressBar,
+    ) -> Self {
+        Self {
+            logs,
+            label,
+            program,
+            arguments,
+            environment: &[],
+            timeout: None,
+            progress,
+        }
+    }
+
+    /// Adds environment variables to the child process.
+    #[must_use]
+    pub(crate) fn environment(mut self, environment: &'a [(&'a str, OsString)]) -> Self {
+        self.environment = environment;
+        self
+    }
+
+    /// Limits command execution time.
+    #[must_use]
+    pub(crate) fn timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
+        self
+    }
+
+    /// Runs the command and discards its successful standard output.
+    pub(crate) async fn status(self) -> Result<(), Error> {
+        self.execute(OutputMode::Discard).await.map(drop)
+    }
+
+    /// Runs the command and returns its successful standard output.
+    pub(crate) async fn output(self) -> Result<String, Error> {
+        self.execute(OutputMode::Utf8).await
+    }
+
+    /// Executes the configured command.
+    async fn execute(self, output_mode: OutputMode) -> Result<String, Error> {
+        let mut command_log = self
+            .logs
+            .command(self.label, self.program, self.arguments)?;
+        let (stdout_log, stderr_log) = command_log.take_outputs();
+        let mut process = Command::new(self.program);
+        process
+            .args(self.arguments)
+            .envs(self.environment.iter().cloned())
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let command = format!("{:?}", process.as_std());
+        let mut process = match process.spawn() {
+            Ok(process) => process,
+            Err(source) => {
+                let error = Error::CommandSpawn {
                     command: command.clone(),
-                    seconds: limit.as_secs(),
+                    source,
                 };
                 command_log.fail(&error.to_string())?;
                 return Err(error);
             }
-        },
-        None => completion.await,
-    };
-    let status = match status {
-        Ok(status) => status,
-        Err(source) => {
-            let error = Error::CommandWait {
-                command: command.clone(),
-                source,
-            };
-            command_log.fail(&error.to_string())?;
-            return Err(error);
-        }
-    };
-    let output = match output {
-        Ok(output) => output,
-        Err(error) => {
-            command_log.fail(&error.to_string())?;
-            return Err(error);
-        }
-    };
-    if !status.success() {
-        command_log.complete(status)?;
-        return Err(Error::CommandFailed {
-            command,
-            status,
-            stderr: error_output(&output.stderr),
-        });
-    }
+        };
+        let stdout = process
+            .stdout
+            .take()
+            .expect("piped standard output should be available");
+        let stderr = process
+            .stderr
+            .take()
+            .expect("piped standard error should be available");
 
-    match String::from_utf8(output.stdout) {
-        Ok(stdout) => {
+        let completion = async {
+            tokio::join!(
+                process.wait(),
+                capture_output(
+                    stdout,
+                    stderr,
+                    stdout_log,
+                    stderr_log,
+                    &command,
+                    self.progress,
+                )
+            )
+        };
+        let (status, output) = match self.timeout {
+            Some(limit) => match time::timeout(limit, completion).await {
+                Ok(completion) => completion,
+                Err(_elapsed) => {
+                    let error = Error::CommandTimedOut {
+                        command: command.clone(),
+                        seconds: limit.as_secs(),
+                    };
+                    command_log.fail(&error.to_string())?;
+                    return Err(error);
+                }
+            },
+            None => completion.await,
+        };
+        let status = match status {
+            Ok(status) => status,
+            Err(source) => {
+                let error = Error::CommandWait {
+                    command: command.clone(),
+                    source,
+                };
+                command_log.fail(&error.to_string())?;
+                return Err(error);
+            }
+        };
+        let output = match output {
+            Ok(output) => output,
+            Err(error) => {
+                command_log.fail(&error.to_string())?;
+                return Err(error);
+            }
+        };
+        if !status.success() {
             command_log.complete(status)?;
-            Ok(stdout)
+            return Err(Error::CommandFailed {
+                command,
+                status,
+                stderr: error_output(&output.stderr),
+            });
         }
-        Err(source) => {
-            let error = Error::CommandOutput { command, source };
-            command_log.fail(&error.to_string())?;
-            Err(error)
+
+        match output_mode {
+            OutputMode::Discard => {
+                command_log.complete(status)?;
+                Ok(String::new())
+            }
+            OutputMode::Utf8 => match String::from_utf8(output.stdout) {
+                Ok(stdout) => {
+                    command_log.complete(status)?;
+                    Ok(stdout)
+                }
+                Err(source) => {
+                    let error = Error::CommandOutput { command, source };
+                    command_log.fail(&error.to_string())?;
+                    Err(error)
+                }
+            },
         }
     }
 }
@@ -374,7 +384,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::{io::AsyncWriteExt, time};
 
-    use super::{OUTPUT_REFRESH_INTERVAL, capture_output, run, run_status_bounded};
+    use super::{Invocation, OUTPUT_REFRESH_INTERVAL, capture_output};
     use crate::{
         error::Error,
         logs::{LogMode, RunLog},
@@ -418,15 +428,15 @@ mod tests {
         )
         .expect("disabled logs should start");
         let progress = ProgressBar::hidden();
-        let result = run_status_bounded(
+        let result = Invocation::new(
             &logs,
             "timeout",
             "sh",
             &[OsString::from("-c"), OsString::from("sleep 10")],
-            &[],
-            Duration::from_millis(20),
             &progress,
         )
+        .timeout(Duration::from_millis(20))
+        .status()
         .await;
 
         assert!(matches!(result, Err(Error::CommandTimedOut { .. })));
@@ -445,13 +455,24 @@ mod tests {
         )
         .expect("run log should start");
         let progress = ProgressBar::hidden();
-        let result = run(
+        Invocation::new(
+            &logs,
+            "ignored-output",
+            "sh",
+            &[OsString::from("-c"), OsString::from("printf '\\377'")],
+            &progress,
+        )
+        .status()
+        .await
+        .expect("discarded output should not require UTF-8");
+        let result = Invocation::new(
             &logs,
             "invalid-output",
             "sh",
             &[OsString::from("-c"), OsString::from("printf '\\377'")],
             &progress,
         )
+        .output()
         .await;
         let error = result.expect_err("non-UTF-8 output should fail");
         assert!(matches!(error, Error::CommandOutput { .. }));
