@@ -1,6 +1,9 @@
 //! Deployment progress bar styling.
 
-use std::time::Duration;
+use std::{
+    fmt::{self, Display, Formatter},
+    time::Duration,
+};
 
 use dialoguer::console::{Style, style};
 use indicatif::{MultiProgress, ProgressBar, ProgressStyle};
@@ -36,18 +39,6 @@ pub(crate) enum DeploymentPhase {
 }
 
 impl DeploymentPhase {
-    /// Returns the phase label.
-    fn label(self) -> &'static str {
-        match self {
-            Self::Testing => "testing",
-            Self::BuildingVerifier => "building verifier",
-            Self::RunningVerifier => "running verifier",
-            Self::Switching => "switching",
-            Self::RollingBack => "rolling back",
-            Self::CollectingGarbage => "collecting garbage",
-        }
-    }
-
     /// Returns the phase color.
     fn style(self) -> Style {
         let style = Style::new().for_stderr();
@@ -57,6 +48,19 @@ impl DeploymentPhase {
             Self::Switching => style.magenta(),
             Self::RollingBack => style.red(),
         }
+    }
+}
+
+impl Display for DeploymentPhase {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Testing => "testing",
+            Self::BuildingVerifier => "building verifier",
+            Self::RunningVerifier => "running verifier",
+            Self::Switching => "switching",
+            Self::RollingBack => "rolling back",
+            Self::CollectingGarbage => "collecting garbage",
+        })
     }
 }
 
@@ -81,7 +85,7 @@ pub(crate) fn review(host_count: usize, update: bool) -> Result<ProgressBar, Err
 }
 
 /// Displays a host identity and status using distinct styles.
-fn set_status(progress: &ProgressBar, host: &str, status: &str, status_style: &Style) {
+fn set_status(progress: &ProgressBar, host: &str, status: impl Display, status_style: &Style) {
     let host = style(format!("{host:<12}")).for_stderr().bold();
     let status = status_style.apply_to(format!("{status:<16}"));
     progress.set_prefix(format!("{host} {status}"));
@@ -90,7 +94,7 @@ fn set_status(progress: &ProgressBar, host: &str, status: &str, status_style: &S
 
 /// Displays a host identity and its current deployment phase.
 pub(crate) fn set_phase(progress: &ProgressBar, host: &str, phase: DeploymentPhase) {
-    set_status(progress, host, phase.label(), &phase.style());
+    set_status(progress, host, phase, &phase.style());
 }
 
 /// Finishes a host status line successfully.

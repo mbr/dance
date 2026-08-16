@@ -53,20 +53,15 @@ async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
 
 /// Reports a workflow result and its retained diagnostic directory.
 fn report(result: Result<(), Error>, logs: Result<Option<PathBuf>, Error>) -> ExitCode {
-    let (succeeded, path) = match (result, logs) {
-        (Ok(()), Ok(path)) => (true, path),
-        (Err(error), Ok(path)) => {
+    let succeeded = result.is_ok() && logs.is_ok();
+    if let Err(error) = result {
+        eprintln!("error: {}", error.display_full());
+    }
+    let path = match logs {
+        Ok(path) => path,
+        Err(error) => {
             eprintln!("error: {}", error.display_full());
-            (false, path)
-        }
-        (Ok(()), Err(error)) => {
-            eprintln!("error: {}", error.display_full());
-            (false, None)
-        }
-        (Err(workflow), Err(logs)) => {
-            eprintln!("error: {}", workflow.display_full());
-            eprintln!("error: {}", logs.display_full());
-            (false, None)
+            None
         }
     };
     println!("status: {}", if succeeded { "succeeded" } else { "failed" });
