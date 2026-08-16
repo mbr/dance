@@ -36,9 +36,11 @@ async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
             let options = deployment::DeployOptions {
                 update_flakes: args.workflow.update,
                 approved: args.yes,
-                skip_verifier: args.skip_verifier,
-                rollback: !args.no_rollback,
-                keep_generations: (!args.no_gc).then_some(args.keep_generations),
+                activation: deployment::ActivationOptions {
+                    include_verifier: !args.skip_verifier,
+                    rollback: !args.no_rollback,
+                    keep_generations: (!args.no_gc).then_some(args.keep_generations),
+                },
             };
             deployment::deploy(inventory, options, logs).await
         }

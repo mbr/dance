@@ -1,30 +1,16 @@
 //! Per-host testing, verification, activation, rollback, and cleanup.
 
-use std::{
-    fmt::{self, Display, Formatter},
-    num::NonZeroU32,
-};
+use std::fmt::{self, Display, Formatter};
 
 use indicatif::ProgressBar;
 
-use super::{operations, review::ReviewedHost, rollback};
+use super::{ActivationOptions, operations, review::ReviewedHost, rollback};
 use crate::{
     error::Error,
     logs::RunLog,
     status::{self, DeploymentPhase},
     verification,
 };
-
-/// Configures verifier execution, rollback, and cleanup for one host.
-#[derive(Clone, Copy)]
-pub(super) struct Options {
-    /// Selects whether a configured verifier is included.
-    pub(super) include_verifier: bool,
-    /// Selects whether failed tests or verification trigger live restoration.
-    pub(super) rollback: bool,
-    /// Selects cleanup and generation retention after activation.
-    pub(super) keep_generations: Option<NonZeroU32>,
-}
 
 /// Describes the result of one host deployment.
 pub(super) enum Outcome {
@@ -128,7 +114,7 @@ impl Display for Summary {
 /// Handles one failed deployment step according to the rollback policy.
 async fn fail(
     reviewed: &ReviewedHost,
-    options: Options,
+    options: ActivationOptions,
     persistence: rollback::Persistence,
     trigger: Error,
     logs: &RunLog,
@@ -160,7 +146,7 @@ async fn fail(
 /// Temporarily activates, verifies, and persists one host configuration.
 pub(super) async fn activate(
     reviewed: ReviewedHost,
-    options: Options,
+    options: ActivationOptions,
     logs: &RunLog,
     progress: &ProgressBar,
 ) -> Outcome {

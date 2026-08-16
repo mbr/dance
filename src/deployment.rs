@@ -15,7 +15,7 @@ use futures::future::join_all;
 use tabled::Table;
 
 use self::{
-    activation::{Options as ActivationOptions, Summary as ActivationSummary},
+    activation::Summary as ActivationSummary,
     review::{HostRow, ReviewOutcome, ReviewedHost},
 };
 use crate::{
@@ -33,8 +33,15 @@ pub(crate) struct DeployOptions {
     pub(crate) update_flakes: bool,
     /// Selects whether interactive approval has been bypassed.
     pub(crate) approved: bool,
-    /// Selects whether configured verifier outputs are skipped.
-    pub(crate) skip_verifier: bool,
+    /// Configures work performed after approval.
+    pub(crate) activation: ActivationOptions,
+}
+
+/// Configures activation, verification, rollback, and cleanup.
+#[derive(Clone, Copy)]
+pub(crate) struct ActivationOptions {
+    /// Selects whether a configured verifier is included.
+    pub(crate) include_verifier: bool,
     /// Selects whether failed deployments restore their reviewed systems.
     pub(crate) rollback: bool,
     /// Selects post-deployment cleanup and generation retention.
@@ -77,16 +84,7 @@ pub(crate) async fn deploy(
         return first_error.map_or(Ok(()), Err);
     }
 
-    let activation = activate(
-        outdated,
-        ActivationOptions {
-            include_verifier: !options.skip_verifier,
-            rollback: options.rollback,
-            keep_generations: options.keep_generations,
-        },
-        logs,
-    )
-    .await;
+    let activation = activate(outdated, options.activation, logs).await;
     first_error.map_or(activation, Err)
 }
 
