@@ -9,7 +9,7 @@ use crate::{
     error::Error,
     logs::RunLog,
     status::{self, DeploymentPhase},
-    verification::Verifier,
+    verification,
 };
 
 /// Configures verifier execution, rollback, and cleanup for one host.
@@ -37,14 +37,19 @@ pub(super) enum Outcome {
     CleanupFailed(Error),
 }
 
-/// Restores the reviewed system after a failed deployment step.
-async fn recover(
+/// Handles one failed deployment step according to the rollback policy.
+async fn fail(
     reviewed: &ReviewedHost,
+    options: Options,
     persistence: rollback::Persistence,
     trigger: Error,
     logs: &RunLog,
     progress: &ProgressBar,
 ) -> Outcome {
+    if !options.rollback {
+        return Outcome::Failed(trigger);
+    }
+
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::RollingBack);
     match rollback::restore(
         &reviewed.host,
@@ -73,100 +78,42 @@ pub(super) async fn activate(
 ) -> Outcome {
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Testing);
     if let Err(error) = operations::test(&reviewed.host, logs, progress).await {
-        return if options.rollback {
-            recover(
-                &reviewed,
-                rollback::Persistence::Runtime,
-                error,
-                logs,
-                progress,
-            )
-            .await
-        } else {
-            Outcome::Failed(error)
-        };
+        return fail(
+            &reviewed,
+            options,
+            rollback::Persistence::Runtime,
+            error,
+            logs,
+            progress,
+        )
+        .await;
     }
 
-    let verifier = if options.include_verifier {
-        status::set_phase(
+    if options.include_verifier
+        && let Err(error) = verification::run_configured(&reviewed.host, logs, progress).await
+    {
+        return fail(
+            &reviewed,
+            options,
+            rollback::Persistence::Runtime,
+            error,
+            logs,
             progress,
-            reviewed.host.id(),
-            DeploymentPhase::BuildingVerifier,
-        );
-        match Verifier::discover(&reviewed.host, logs, progress).await {
-            Ok(Some(verifier)) => {
-                if let Err(error) = verifier.build(&reviewed.host, logs, progress).await {
-                    return if options.rollback {
-                        recover(
-                            &reviewed,
-                            rollback::Persistence::Runtime,
-                            error,
-                            logs,
-                            progress,
-                        )
-                        .await
-                    } else {
-                        Outcome::Failed(error)
-                    };
-                }
-                Some(verifier)
-            }
-            Ok(None) => None,
-            Err(error) => {
-                return if options.rollback {
-                    recover(
-                        &reviewed,
-                        rollback::Persistence::Runtime,
-                        error,
-                        logs,
-                        progress,
-                    )
-                    .await
-                } else {
-                    Outcome::Failed(error)
-                };
-            }
-        }
-    } else {
-        None
-    };
-
-    if let Some(verifier) = &verifier {
-        status::set_phase(
-            progress,
-            reviewed.host.id(),
-            DeploymentPhase::RunningVerifier,
-        );
-        if let Err(error) = verifier.run(&reviewed.host, logs, progress).await {
-            return if options.rollback {
-                recover(
-                    &reviewed,
-                    rollback::Persistence::Runtime,
-                    error,
-                    logs,
-                    progress,
-                )
-                .await
-            } else {
-                Outcome::Failed(error)
-            };
-        }
+        )
+        .await;
     }
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Switching);
     if let Err(error) = operations::switch(&reviewed.host, logs, progress).await {
-        return if options.rollback {
-            recover(
-                &reviewed,
-                rollback::Persistence::System,
-                error,
-                logs,
-                progress,
-            )
-            .await
-        } else {
-            Outcome::Failed(error)
-        };
+        return fail(
+            &reviewed,
+            options,
+            rollback::Persistence::System,
+            error,
+            logs,
+            progress,
+        )
+        .await;
     }
 
     if let Some(keep_generations) = options.keep_generations {

@@ -96,7 +96,7 @@ impl HostRow {
 pub(super) enum ReviewOutcome {
     /// The host already runs the desired system.
     UpToDate(HostRow),
-    /// The host needs to be built, prepared, and activated.
+    /// The host needs to be tested, verified, and switched.
     OutOfDate(HostRow, Box<ReviewedHost>),
 }
 

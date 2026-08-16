@@ -44,7 +44,7 @@ else {
 "#;
 
 /// Describes a runnable verifier evaluated from a flake.
-pub(crate) struct Verifier {
+struct Verifier {
     /// Identifies the verifier's unrealized output path.
     output: StorePath,
     /// Identifies the executable within the output path.
@@ -55,7 +55,7 @@ pub(crate) struct Verifier {
 
 impl Verifier {
     /// Discovers the verifier for one host when configured.
-    pub(crate) async fn discover(
+    async fn discover(
         host: &Host,
         logs: &RunLog,
         progress: &ProgressBar,
@@ -116,12 +116,7 @@ impl Verifier {
     }
 
     /// Builds the verifier in the local Nix store.
-    pub(crate) async fn build(
-        &self,
-        host: &Host,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
+    async fn build(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
         let label = format!("verify-{}-build", host.id());
         run_status(
             logs,
@@ -138,12 +133,7 @@ impl Verifier {
     }
 
     /// Runs the built verifier on the deployment machine.
-    pub(crate) async fn run(
-        &self,
-        host: &Host,
-        logs: &RunLog,
-        progress: &ProgressBar,
-    ) -> Result<(), Error> {
+    async fn run(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
         let label = format!("verify-{}-run", host.id());
         let environment = [
             ("DANCE_HOST_ID", OsString::from(host.id())),
@@ -192,6 +182,31 @@ struct VerifierRecord {
     system: String,
 }
 
+/// Describes whether a configured verifier ran.
+pub(crate) enum ConfiguredOutcome {
+    /// The configured verifier succeeded.
+    Verified,
+    /// The host has no configured verifier.
+    Missing,
+}
+
+/// Discovers, builds, and runs the verifier configured for one host.
+pub(crate) async fn run_configured(
+    host: &Host,
+    logs: &RunLog,
+    progress: &ProgressBar,
+) -> Result<ConfiguredOutcome, Error> {
+    status::set_phase(progress, host.id(), DeploymentPhase::BuildingVerifier);
+    let Some(verifier) = Verifier::discover(host, logs, progress).await? else {
+        return Ok(ConfiguredOutcome::Missing);
+    };
+    verifier.build(host, logs, progress).await?;
+
+    status::set_phase(progress, host.id(), DeploymentPhase::RunningVerifier);
+    verifier.run(host, logs, progress).await?;
+    Ok(ConfiguredOutcome::Verified)
+}
+
 /// Describes one host's standalone verification result.
 enum Outcome {
     /// The configured verifier succeeded.
@@ -204,24 +219,14 @@ enum Outcome {
 
 /// Runs the verifier configured for one host.
 async fn verify_host(host: Host, logs: &RunLog, progress: &ProgressBar) -> Outcome {
-    status::set_phase(progress, host.id(), DeploymentPhase::BuildingVerifier);
-    let verifier = match Verifier::discover(&host, logs, progress).await {
-        Ok(Some(verifier)) => verifier,
-        Ok(None) => {
-            status::verifier_missing(progress, host.id());
-            return Outcome::Skipped;
-        }
-        Err(error) => return Outcome::Failed(error),
-    };
-    if let Err(error) = verifier.build(&host, logs, progress).await {
-        return Outcome::Failed(error);
-    }
-
-    status::set_phase(progress, host.id(), DeploymentPhase::RunningVerifier);
-    match verifier.run(&host, logs, progress).await {
-        Ok(()) => {
+    match run_configured(&host, logs, progress).await {
+        Ok(ConfiguredOutcome::Verified) => {
             status::verified(progress, host.id());
             Outcome::Verified
+        }
+        Ok(ConfiguredOutcome::Missing) => {
+            status::verifier_missing(progress, host.id());
+            Outcome::Skipped
         }
         Err(error) => Outcome::Failed(error),
     }
