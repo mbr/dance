@@ -15,7 +15,7 @@ use futures::future::join_all;
 use tabled::Table;
 
 use self::{
-    activation::{Options as ActivationOptions, Outcome as ActivationOutcome},
+    activation::{Options as ActivationOptions, Summary as ActivationSummary},
     review::{HostRow, ReviewOutcome, ReviewedHost},
 };
 use crate::{
@@ -120,15 +120,15 @@ async fn collect(
             }
         }))
         .await;
-        (updates, expected)
+        (updates.into_error(), expected)
     };
-    let (deployed, (mut updates, expected)) = tokio::join!(deployed, local);
+    let (deployed, (update_error, expected)) = tokio::join!(deployed, local);
 
     let mut rows = Vec::with_capacity(hosts.len());
     let mut outdated = Vec::new();
     let mut up_to_date = 0;
     let mut failed = 0;
-    let mut first_error = updates.take_error();
+    let mut first_error = update_error;
     for ((host, deployed), expected) in hosts.into_iter().zip(deployed).zip(expected) {
         let failed_row = HostRow::failed(&host);
         match (deployed, expected) {
@@ -198,56 +198,18 @@ async fn activate(
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
     let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
+            let id = host.id().to_owned();
             let outcome = activation::activate(host, options, logs, progress).await;
-            match &outcome {
-                ActivationOutcome::Activated => {}
-                ActivationOutcome::RecoveryRequired(_) => status::recovery_required(progress),
-                _ => status::fail(progress),
-            }
+            outcome.finish_progress(&id, progress);
             outcome
         },
     ))
     .await;
 
-    let mut activated = 0;
-    let mut failed = 0;
-    let mut rolled_back = 0;
-    let mut recovery_required = 0;
-    let mut cleanup_failed = 0;
-    let mut first_error = None;
+    let mut summary = ActivationSummary::default();
     for outcome in outcomes {
-        match outcome {
-            ActivationOutcome::Activated => activated += 1,
-            ActivationOutcome::Failed(error) => {
-                failed += 1;
-                first_error.get_or_insert(error);
-            }
-            ActivationOutcome::RolledBack(error) => {
-                rolled_back += 1;
-                first_error.get_or_insert(error);
-            }
-            ActivationOutcome::RecoveryRequired(error) => {
-                recovery_required += 1;
-                first_error.get_or_insert(error);
-            }
-            ActivationOutcome::CleanupFailed(error) => {
-                activated += 1;
-                cleanup_failed += 1;
-                first_error.get_or_insert(error);
-            }
-        }
-    }
-    let mut summary = format!("deployment: {activated} activated, {failed} failed");
-    if rolled_back != 0 {
-        summary.push_str(&format!(", {rolled_back} rolled back"));
-    }
-    if recovery_required != 0 {
-        summary.push_str(&format!(", {recovery_required} recovery required"));
-    }
-    if cleanup_failed != 0 {
-        summary.push_str(&format!(", {cleanup_failed} cleanup failed"));
+        summary.record(outcome);
     }
     println!("{summary}");
-
-    first_error.map_or(Ok(()), Err)
+    summary.result()
 }

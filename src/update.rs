@@ -25,9 +25,9 @@ impl UpdateOutcome {
         self.failed.contains(flake)
     }
 
-    /// Takes the first update error.
-    pub(crate) fn take_error(&mut self) -> Option<Error> {
-        self.first_error.take()
+    /// Returns the first update error.
+    pub(crate) fn into_error(self) -> Option<Error> {
+        self.first_error
     }
 }
 

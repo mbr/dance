@@ -1,6 +1,9 @@
 //! Per-host testing, verification, activation, rollback, and cleanup.
 
-use std::num::NonZeroU32;
+use std::{
+    fmt::{self, Display, Formatter},
+    num::NonZeroU32,
+};
 
 use indicatif::ProgressBar;
 
@@ -35,6 +38,91 @@ pub(super) enum Outcome {
     RecoveryRequired(Error),
     /// The host was activated but could not be cleaned.
     CleanupFailed(Error),
+}
+
+impl Outcome {
+    /// Finalizes progress output for a completed host operation.
+    pub(super) fn finish_progress(&self, host: &str, progress: &ProgressBar) {
+        match self {
+            Self::Activated => status::finish(progress, host),
+            Self::RecoveryRequired(_) => status::recovery_required(progress),
+            Self::Failed(_) | Self::RolledBack(_) | Self::CleanupFailed(_) => {
+                status::fail(progress);
+            }
+        }
+    }
+}
+
+/// Aggregates deployment outcomes for terminal output and exit status.
+#[derive(Default)]
+pub(super) struct Summary {
+    /// Counts successful activations.
+    activated: usize,
+    /// Counts deployment failures left in place.
+    failed: usize,
+    /// Counts failures followed by successful restoration.
+    rolled_back: usize,
+    /// Counts hosts that need operator recovery.
+    recovery_required: usize,
+    /// Counts successful activations whose cleanup failed.
+    cleanup_failed: usize,
+    /// Retains the first deployment error.
+    first_error: Option<Error>,
+}
+
+impl Summary {
+    /// Adds one host outcome.
+    pub(super) fn record(&mut self, outcome: Outcome) {
+        let error = match outcome {
+            Outcome::Activated => {
+                self.activated += 1;
+                return;
+            }
+            Outcome::Failed(error) => {
+                self.failed += 1;
+                error
+            }
+            Outcome::RolledBack(error) => {
+                self.rolled_back += 1;
+                error
+            }
+            Outcome::RecoveryRequired(error) => {
+                self.recovery_required += 1;
+                error
+            }
+            Outcome::CleanupFailed(error) => {
+                self.activated += 1;
+                self.cleanup_failed += 1;
+                error
+            }
+        };
+        self.first_error.get_or_insert(error);
+    }
+
+    /// Returns the first deployment failure when present.
+    pub(super) fn result(self) -> Result<(), Error> {
+        self.first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl Display for Summary {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "deployment: {} activated, {} failed",
+            self.activated, self.failed
+        )?;
+        for (count, label) in [
+            (self.rolled_back, "rolled back"),
+            (self.recovery_required, "recovery required"),
+            (self.cleanup_failed, "cleanup failed"),
+        ] {
+            if count != 0 {
+                write!(formatter, ", {count} {label}")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Handles one failed deployment step according to the rollback policy.
@@ -129,6 +217,5 @@ pub(super) async fn activate(
         }
     }
 
-    status::finish(progress, reviewed.host.id());
     Outcome::Activated
 }
