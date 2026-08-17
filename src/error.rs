@@ -4,7 +4,7 @@ use std::{io, path::PathBuf, process::ExitStatus};
 
 use thiserror::Error;
 
-use crate::store_path::StorePathError;
+use crate::{inventory::InventoryLoadError, store_path::StorePathError};
 
 /// Describes failures encountered while deploying hosts.
 #[derive(Debug, Error)]
@@ -93,24 +93,9 @@ pub(crate) enum Error {
         #[source]
         source: io::Error,
     },
-    /// Indicates that an inventory could not be read.
-    #[error("failed to read inventory `{}`", path.display())]
-    ReadInventory {
-        /// Identifies the inventory.
-        path: PathBuf,
-        /// Contains the filesystem error.
-        #[source]
-        source: io::Error,
-    },
-    /// Indicates that an inventory was malformed.
-    #[error("failed to parse inventory `{}`", path.display())]
-    ParseInventory {
-        /// Identifies the inventory.
-        path: PathBuf,
-        /// Contains the TOML error.
-        #[source]
-        source: toml::de::Error,
-    },
+    /// Indicates that an inventory could not be loaded.
+    #[error(transparent)]
+    InventoryLoad(InventoryLoadError),
     /// Indicates that a requested ID is not in the inventory.
     #[error("ID `{id}` is not in the inventory")]
     UnknownId {

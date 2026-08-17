@@ -3,14 +3,38 @@
 use std::{
     collections::HashSet,
     ffi::OsString,
-    fs,
+    fs, io,
     path::{Path, PathBuf},
 };
 
 use indexmap::IndexMap;
 use serde::Deserialize;
+use thiserror::Error;
 
 use crate::error::Error;
+
+/// Describes failures encountered while loading an inventory.
+#[derive(Debug, Error)]
+pub(crate) enum InventoryLoadError {
+    /// Indicates that an inventory could not be read.
+    #[error("failed to read inventory `{}`", path.display())]
+    Read {
+        /// Identifies the inventory.
+        path: PathBuf,
+        /// Contains the filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// Indicates that an inventory was malformed.
+    #[error("failed to parse inventory `{}`", path.display())]
+    Parse {
+        /// Identifies the inventory.
+        path: PathBuf,
+        /// Contains the TOML error.
+        #[source]
+        source: toml::de::Error,
+    },
+}
 
 /// Contains the hosts managed by Dance.
 #[derive(Deserialize)]
@@ -31,13 +55,13 @@ impl IntoIterator for Inventory {
 
 impl Inventory {
     /// Loads an inventory and resolves its flake paths.
-    pub(crate) fn load(path: &Path) -> Result<Self, Error> {
-        let contents = fs::read_to_string(path).map_err(|source| Error::ReadInventory {
+    pub(crate) fn load(path: &Path) -> Result<Self, InventoryLoadError> {
+        let contents = fs::read_to_string(path).map_err(|source| InventoryLoadError::Read {
             path: path.to_path_buf(),
             source,
         })?;
         let mut inventory: Self =
-            toml::from_str(&contents).map_err(|source| Error::ParseInventory {
+            toml::from_str(&contents).map_err(|source| InventoryLoadError::Parse {
                 path: path.to_path_buf(),
                 source,
             })?;
@@ -164,7 +188,7 @@ mod tests {
 
     use indexmap::IndexMap;
 
-    use super::{Host, Inventory};
+    use super::{Host, Inventory, InventoryLoadError};
     use crate::error::Error;
 
     /// Creates a minimal inventory with hosts in the given order.
@@ -185,6 +209,24 @@ mod tests {
                 })
                 .collect::<IndexMap<_, _>>(),
         }
+    }
+
+    /// Checks that loading preserves structured read and parse failures.
+    #[test]
+    fn reports_inventory_load_errors() {
+        let directory = tempfile::tempdir().expect("temporary directory should be created");
+        let missing = directory.path().join("missing.toml");
+        assert!(matches!(
+            Inventory::load(&missing),
+            Err(InventoryLoadError::Read { path, .. }) if path == missing
+        ));
+
+        let malformed = directory.path().join("malformed.toml");
+        std::fs::write(&malformed, "not TOML =").expect("malformed inventory should be written");
+        assert!(matches!(
+            Inventory::load(&malformed),
+            Err(InventoryLoadError::Parse { path, .. }) if path == malformed
+        ));
     }
 
     /// Checks table parsing, selection validation, and inventory order.

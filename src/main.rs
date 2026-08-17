@@ -25,7 +25,7 @@ use crate::{
 
 /// Runs the selected workflow.
 async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
-    let inventory = Inventory::load(&cli.inventory)?;
+    let inventory = Inventory::load(&cli.inventory).map_err(Error::InventoryLoad)?;
     match cli.command {
         Command::Review(args) => {
             let inventory = inventory.select(&args.ids)?;
