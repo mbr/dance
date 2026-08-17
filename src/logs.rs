@@ -358,17 +358,21 @@ fn write_event(log: &mut RunFile, event: &str) -> Result<(), Error> {
 
 /// Converts a command label into a portable filename component.
 fn sanitize(label: &str) -> String {
-    let value = label
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    value.trim_matches('-').to_owned()
+    let mut sanitized = String::with_capacity(label.len());
+    for character in label.chars() {
+        let character = if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+            character
+        } else {
+            '-'
+        };
+        if character != '-' || (!sanitized.is_empty() && !sanitized.ends_with('-')) {
+            sanitized.push(character);
+        }
+    }
+    if sanitized.ends_with('-') {
+        sanitized.pop();
+    }
+    sanitized
 }
 
 /// Creates a truncated diagnostic file.
@@ -421,7 +425,7 @@ mod tests {
         )
         .expect("run log should start");
         let mut command = logs
-            .command("review party", "ssh", &["party".into()])
+            .command("--review / party--", "ssh", &["party".into()])
             .expect("command log should start");
         let (mut stdout, mut stderr) = command.take_outputs();
         stdout
@@ -459,7 +463,7 @@ mod tests {
             .expect("lifecycle log should be readable");
         assert!(run.contains("run started format=1 inventory=\"inventory.toml\" arguments=["));
         assert!(run.contains(
-            "command 001 started label=\"review party\" arguments=[\"ssh\", \"party\"] stdout=\"001-review-party.stdout\" stderr=\"001-review-party.stderr\""
+            "command 001 started label=\"--review / party--\" arguments=[\"ssh\", \"party\"] stdout=\"001-review-party.stdout\" stderr=\"001-review-party.stderr\""
         ));
         assert!(run.contains("command 001 succeeded exit_code=0 duration_ms="));
         assert!(run.contains("run succeeded duration_ms="));
