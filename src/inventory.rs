@@ -13,27 +13,26 @@ use thiserror::Error;
 
 use crate::error::Error;
 
-/// Describes failures encountered while loading an inventory.
+/// Describes a failure encountered while loading an inventory.
 #[derive(Debug, Error)]
-pub(crate) enum InventoryLoadError {
-    /// Indicates that an inventory could not be read.
-    #[error("failed to read inventory `{}`", path.display())]
-    Read {
-        /// Identifies the inventory.
-        path: PathBuf,
-        /// Contains the filesystem error.
-        #[source]
-        source: io::Error,
-    },
-    /// Indicates that an inventory was malformed.
-    #[error("failed to parse inventory `{}`", path.display())]
-    Parse {
-        /// Identifies the inventory.
-        path: PathBuf,
-        /// Contains the TOML error.
-        #[source]
-        source: toml::de::Error,
-    },
+#[error("failed to load inventory `{}`", path.display())]
+pub(crate) struct InventoryLoadError {
+    /// Identifies the inventory.
+    path: PathBuf,
+    /// Describes the failed loading operation.
+    #[source]
+    variant: InventoryLoadErrorVariant,
+}
+
+/// Describes the operation that prevented an inventory from loading.
+#[derive(Debug, Error)]
+enum InventoryLoadErrorVariant {
+    /// Indicates that the inventory could not be read.
+    #[error("failed to read inventory")]
+    Read(#[source] io::Error),
+    /// Indicates that the inventory was malformed.
+    #[error("failed to parse inventory")]
+    Parse(#[source] toml::de::Error),
 }
 
 /// Contains the hosts managed by Dance.
@@ -56,14 +55,14 @@ impl IntoIterator for Inventory {
 impl Inventory {
     /// Loads an inventory and resolves its flake paths.
     pub(crate) fn load(path: &Path) -> Result<Self, InventoryLoadError> {
-        let contents = fs::read_to_string(path).map_err(|source| InventoryLoadError::Read {
+        let contents = fs::read_to_string(path).map_err(|source| InventoryLoadError {
             path: path.to_path_buf(),
-            source,
+            variant: InventoryLoadErrorVariant::Read(source),
         })?;
         let mut inventory: Self =
-            toml::from_str(&contents).map_err(|source| InventoryLoadError::Parse {
+            toml::from_str(&contents).map_err(|source| InventoryLoadError {
                 path: path.to_path_buf(),
-                source,
+                variant: InventoryLoadErrorVariant::Parse(source),
             })?;
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
 
@@ -188,7 +187,7 @@ mod tests {
 
     use indexmap::IndexMap;
 
-    use super::{Host, Inventory, InventoryLoadError};
+    use super::{Host, Inventory, InventoryLoadError, InventoryLoadErrorVariant};
     use crate::error::Error;
 
     /// Creates a minimal inventory with hosts in the given order.
@@ -218,14 +217,20 @@ mod tests {
         let missing = directory.path().join("missing.toml");
         assert!(matches!(
             Inventory::load(&missing),
-            Err(InventoryLoadError::Read { path, .. }) if path == missing
+            Err(InventoryLoadError {
+                path,
+                variant: InventoryLoadErrorVariant::Read(_),
+            }) if path == missing
         ));
 
         let malformed = directory.path().join("malformed.toml");
         std::fs::write(&malformed, "not TOML =").expect("malformed inventory should be written");
         assert!(matches!(
             Inventory::load(&malformed),
-            Err(InventoryLoadError::Parse { path, .. }) if path == malformed
+            Err(InventoryLoadError {
+                path,
+                variant: InventoryLoadErrorVariant::Parse(_),
+            }) if path == malformed
         ));
     }
 
