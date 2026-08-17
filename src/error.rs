@@ -1,10 +1,37 @@
 //! Application error types.
 
-use std::{io, path::PathBuf, process::ExitStatus};
+use std::{
+    io,
+    path::{Path, PathBuf},
+    process::ExitStatus,
+};
 
 use thiserror::Error;
 
 use crate::{inventory::InventoryError, logs::LogError, store_path::StorePathError};
+
+/// Associates an input/output failure with the affected path.
+#[derive(Debug, Error)]
+#[error("I/O error")]
+pub(crate) struct PathIoError {
+    /// Identifies the affected filesystem entry.
+    path: PathBuf,
+    /// Contains the input/output error.
+    #[source]
+    source: io::Error,
+}
+
+impl PathIoError {
+    /// Associates an input/output failure with its path.
+    pub(crate) fn new(path: PathBuf, source: io::Error) -> Self {
+        Self { path, source }
+    }
+
+    /// Returns the affected path.
+    pub(crate) fn path(&self) -> &Path {
+        &self.path
+    }
+}
 
 /// Describes failures encountered while deploying hosts.
 #[derive(Debug, Error)]
