@@ -1,11 +1,11 @@
 //! Persistent subprocess diagnostics.
 
 #[cfg(unix)]
-use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+use std::os::unix::fs::DirBuilderExt;
 use std::{
     env,
     ffi::{OsStr, OsString},
-    fs::{self, File, OpenOptions},
+    fs::{self, File},
     io::Write,
     path::{Path, PathBuf},
     process::ExitStatus,
@@ -119,7 +119,7 @@ impl RunLog {
         })?;
         let directory = create_run_directory(&base)?;
         let path = directory.join("run.log");
-        let file = open_secure(&path)?;
+        let file = open_log(&path)?;
         let log = Self {
             mode,
             directory: Some(directory),
@@ -169,8 +169,8 @@ impl RunLog {
         let stderr_name = format!("{stem}.stderr");
         let stdout = directory.join(&stdout_name);
         let stderr = directory.join(&stderr_name);
-        let stdout_log = open_secure(&stdout)?;
-        let stderr_log = open_secure(&stderr)?;
+        let stdout_log = open_log(&stdout)?;
+        let stderr_log = open_log(&stderr)?;
         let command_arguments =
             std::iter::once(program.as_ref().to_owned()).chain(arguments.iter().cloned());
         write_event(
@@ -371,13 +371,9 @@ fn sanitize(label: &str) -> String {
     value.trim_matches('-').to_owned()
 }
 
-/// Opens a truncated file with private permissions.
-fn open_secure(path: &Path) -> Result<File, Error> {
-    let mut options = OpenOptions::new();
-    options.create(true).truncate(true).write(true);
-    #[cfg(unix)]
-    options.mode(0o600);
-    options.open(path).map_err(|source| Error::WriteLog {
+/// Creates a truncated diagnostic file.
+fn open_log(path: &Path) -> Result<File, Error> {
+    File::create(path).map_err(|source| Error::WriteLog {
         path: path.to_path_buf(),
         source,
     })
