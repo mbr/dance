@@ -67,7 +67,7 @@
           rustEnv
           // {
             inputsFrom = [ self.packages.${system}.default ];
-            buildInputs = [
+            nativeBuildInputs = [
               devToolchain
               pkgs.nixfmt
             ];
