@@ -238,13 +238,7 @@ fn parse(host: &str, output: &str) -> Result<Option<Verifier>, Error> {
         })?;
     record
         .map(|verifier| {
-            let output = verifier
-                .output
-                .parse()
-                .map_err(|source| Error::InvalidStorePath {
-                    path: verifier.output,
-                    source,
-                })?;
+            let output = verifier.output.parse().map_err(Error::StorePath)?;
             Ok(Verifier {
                 output,
                 main_program: verifier.main_program,

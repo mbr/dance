@@ -29,10 +29,7 @@ pub(super) async fn deployed_store_path(
     .output()
     .await?;
     let value = output.trim();
-    value.parse().map_err(|source| Error::InvalidStorePath {
-        path: value.to_owned(),
-        source,
-    })
+    value.parse().map_err(Error::StorePath)
 }
 
 /// Evaluates a host's desired system without building it.
@@ -47,10 +44,7 @@ pub(super) async fn expected_store_path(
         .output()
         .await?;
     let value = output.trim();
-    value.parse().map_err(|source| Error::InvalidStorePath {
-        path: value.to_owned(),
-        source,
-    })
+    value.parse().map_err(Error::StorePath)
 }
 
 /// Builds and temporarily activates a host configuration.

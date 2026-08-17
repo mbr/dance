@@ -43,15 +43,17 @@ impl FromStr for StorePath {
         let name = path
             .file_name()
             .and_then(|name| name.to_str())
-            .ok_or(StorePathError)?;
-        let (hash, store_name) = name.split_once('-').ok_or(StorePathError)?;
+            .ok_or_else(|| StorePathError(value.to_owned()))?;
+        let (hash, store_name) = name
+            .split_once('-')
+            .ok_or_else(|| StorePathError(value.to_owned()))?;
 
         if !path.is_absolute()
             || store_name.is_empty()
             || hash.len() != 32
             || !hash.chars().all(|character| NIX_BASE32.contains(character))
         {
-            return Err(StorePathError);
+            return Err(StorePathError(value.to_owned()));
         }
 
         let hash = hash.to_owned();
@@ -65,10 +67,13 @@ impl Display for StorePath {
     }
 }
 
-/// Indicates that a path does not follow the Nix store-path format.
+/// Indicates that a value does not follow the Nix store-path format.
 #[derive(Debug, Error)]
-#[error("invalid store path format")]
-pub(crate) struct StorePathError;
+#[error("invalid Nix store path `{0}`")]
+pub(crate) struct StorePathError(
+    /// Contains the invalid value.
+    String,
+);
 
 /// Tests store-path identity and parsing.
 #[cfg(test)]

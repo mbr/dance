@@ -3,12 +3,13 @@
 use std::{
     io,
     path::{Path, PathBuf},
-    process::ExitStatus,
 };
 
 use thiserror::Error;
 
-use crate::{inventory::InventoryError, logs::LogError, store_path::StorePathError};
+use crate::{
+    inventory::InventoryError, logs::LogError, process::ProcessError, store_path::StorePathError,
+};
 
 /// Associates an input/output failure with the affected path.
 #[derive(Debug, Error)]
@@ -36,60 +37,9 @@ impl PathIoError {
 /// Describes failures encountered while deploying hosts.
 #[derive(Debug, Error)]
 pub(crate) enum Error {
-    /// Indicates that a command could not be started.
-    #[error("failed to run `{command}`")]
-    CommandSpawn {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the operating-system error.
-        #[source]
-        source: io::Error,
-    },
-    /// Indicates that a command could not be awaited.
-    #[error("failed to wait for `{command}`")]
-    CommandWait {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the operating-system error.
-        #[source]
-        source: io::Error,
-    },
-    /// Indicates that command output could not be read.
-    #[error("failed to read output from `{command}`")]
-    CommandOutputRead {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the input/output error.
-        #[source]
-        source: io::Error,
-    },
-    /// Indicates that a command returned a failure status.
-    #[error("`{command}` exited with {status}: {stderr}")]
-    CommandFailed {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the command's exit status.
-        status: ExitStatus,
-        /// Contains standard error from the command.
-        stderr: String,
-    },
-    /// Indicates that a command exceeded its execution deadline.
-    #[error("`{command}` timed out after {seconds} seconds")]
-    CommandTimedOut {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the configured deadline in seconds.
-        seconds: u64,
-    },
-    /// Indicates that command output was not UTF-8.
-    #[error("`{command}` returned non-UTF-8 output")]
-    CommandOutput {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the decoding error.
-        #[source]
-        source: std::string::FromUtf8Error,
-    },
+    /// Indicates that a subprocess operation failed.
+    #[error(transparent)]
+    Process(ProcessError),
     /// Indicates that a logging operation failed.
     #[error(transparent)]
     Log(LogError),
@@ -114,15 +64,9 @@ pub(crate) enum Error {
         #[source]
         source: serde_json::Error,
     },
-    /// Indicates that a command did not return a Nix store path.
-    #[error("invalid Nix store path `{path}`")]
-    InvalidStorePath {
-        /// Contains the invalid value.
-        path: String,
-        /// Contains the parse error.
-        #[source]
-        source: StorePathError,
-    },
+    /// Indicates that a Nix store path was malformed.
+    #[error(transparent)]
+    StorePath(StorePathError),
     /// Indicates that live rollback failed and console recovery is required.
     #[error(
         "live rollback of host `{host}` failed after {trigger}: {rollback}; reboot it through the machine console"

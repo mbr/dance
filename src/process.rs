@@ -3,7 +3,7 @@
 use std::{
     ffi::OsString,
     io,
-    process::Stdio,
+    process::{ExitStatus, Stdio},
     string::FromUtf8Error,
     sync::{Arc, Mutex},
     time::Duration,
@@ -11,6 +11,7 @@ use std::{
 
 use futures::{Stream, StreamExt, stream};
 use indicatif::ProgressBar;
+use thiserror::Error;
 use tokio::{
     io::AsyncRead,
     process::Command,
@@ -22,6 +23,65 @@ use crate::{
     error::Error,
     logs::{CommandLog, LogError, OutputLog, RunLog},
 };
+
+/// Describes a failure encountered while running a subprocess.
+#[derive(Debug, Error)]
+pub(crate) enum ProcessError {
+    /// Indicates that a command could not be started.
+    #[error("failed to run `{command}`")]
+    Spawn {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// Indicates that a command could not be awaited.
+    #[error("failed to wait for `{command}`")]
+    Wait {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the operating-system error.
+        #[source]
+        source: io::Error,
+    },
+    /// Indicates that command output could not be read.
+    #[error("failed to read output from `{command}`")]
+    OutputRead {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the input/output error.
+        #[source]
+        source: io::Error,
+    },
+    /// Indicates that a command returned a failure status.
+    #[error("`{command}` exited with {status}: {stderr}")]
+    Failed {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the command's exit status.
+        status: ExitStatus,
+        /// Contains standard error from the command.
+        stderr: String,
+    },
+    /// Indicates that a command exceeded its execution deadline.
+    #[error("`{command}` timed out after {seconds} seconds")]
+    TimedOut {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the configured deadline in seconds.
+        seconds: u64,
+    },
+    /// Indicates that command output was not UTF-8.
+    #[error("`{command}` returned non-UTF-8 output")]
+    Output {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the decoding error.
+        #[source]
+        source: FromUtf8Error,
+    },
+}
 
 /// Limits how often subprocess output changes a progress message.
 const OUTPUT_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
@@ -171,9 +231,11 @@ async fn capture_output(
     let mut output = stream::select(stdout, stderr);
     display_output(&mut output, progress)
         .await
-        .map_err(|source| Error::CommandOutputRead {
-            command: command.to_owned(),
-            source,
+        .map_err(|source| {
+            Error::Process(ProcessError::OutputRead {
+                command: command.to_owned(),
+                source,
+            })
         })?;
     drop(output);
     Ok(CapturedOutput {
@@ -308,7 +370,10 @@ impl<'a> Invocation<'a> {
         let mut process = match process.spawn() {
             Ok(process) => process,
             Err(source) => {
-                return fail_command(command_log, Error::CommandSpawn { command, source });
+                return fail_command(
+                    command_log,
+                    Error::Process(ProcessError::Spawn { command, source }),
+                );
             }
         };
         let stdout = process
@@ -339,10 +404,10 @@ impl<'a> Invocation<'a> {
                 Err(_elapsed) => {
                     return fail_command(
                         command_log,
-                        Error::CommandTimedOut {
+                        Error::Process(ProcessError::TimedOut {
                             command: command.clone(),
                             seconds: limit.as_secs(),
-                        },
+                        }),
                     );
                 }
             },
@@ -353,10 +418,10 @@ impl<'a> Invocation<'a> {
             Err(source) => {
                 return fail_command(
                     command_log,
-                    Error::CommandWait {
+                    Error::Process(ProcessError::Wait {
                         command: command.clone(),
                         source,
-                    },
+                    }),
                 );
             }
         };
@@ -366,11 +431,11 @@ impl<'a> Invocation<'a> {
         };
         if !status.success() {
             command_log.complete(status).map_err(Error::Log)?;
-            return Err(Error::CommandFailed {
+            return Err(Error::Process(ProcessError::Failed {
                 command,
                 status,
                 stderr: error_output(&output.stderr),
-            });
+            }));
         }
 
         match consume(output.stdout) {
@@ -378,7 +443,10 @@ impl<'a> Invocation<'a> {
                 command_log.complete(status).map_err(Error::Log)?;
                 Ok(output)
             }
-            Err(source) => fail_command(command_log, Error::CommandOutput { command, source }),
+            Err(source) => fail_command(
+                command_log,
+                Error::Process(ProcessError::Output { command, source }),
+            ),
         }
     }
 }
@@ -391,7 +459,7 @@ mod tests {
     use tempfile::tempdir;
     use tokio::{io::AsyncWriteExt, time};
 
-    use super::{Invocation, OUTPUT_REFRESH_INTERVAL, capture_output};
+    use super::{Invocation, OUTPUT_REFRESH_INTERVAL, ProcessError, capture_output};
     use crate::{
         error::Error,
         logs::{LogMode, RunLog},
@@ -441,7 +509,10 @@ mod tests {
             .status()
             .await;
 
-        assert!(matches!(result, Err(Error::CommandTimedOut { .. })));
+        assert!(matches!(
+            result,
+            Err(Error::Process(ProcessError::TimedOut { .. }))
+        ));
         logs.finish(Some("timed out"))
             .expect("disabled logs should finish");
     }
@@ -467,7 +538,7 @@ mod tests {
             .output()
             .await;
         let error = result.expect_err("non-UTF-8 output should fail");
-        assert!(matches!(error, Error::CommandOutput { .. }));
+        assert!(matches!(error, Error::Process(ProcessError::Output { .. })));
         let directory = logs
             .finish(Some("invalid output"))
             .expect("run log should finish")
