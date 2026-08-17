@@ -20,7 +20,7 @@ use tokio_util::io::{InspectReader, ReaderStream};
 
 use crate::{
     error::Error,
-    logs::{CommandLog, OutputLog, RunLog},
+    logs::{CommandLog, LogError, OutputLog, RunLog},
 };
 
 /// Limits how often subprocess output changes a progress message.
@@ -48,7 +48,7 @@ struct CaptureState {
     /// Writes output to persistent diagnostics when enabled.
     log: Option<OutputLog>,
     /// Retains the first diagnostic write failure.
-    error: Option<Error>,
+    error: Option<LogError>,
 }
 
 /// Retains and optionally logs bytes inspected from one output stream.
@@ -93,7 +93,7 @@ impl Capture {
     }
 
     /// Takes retained bytes or the first diagnostic failure.
-    fn take(self) -> Result<Vec<u8>, Error> {
+    fn take(self) -> Result<Vec<u8>, LogError> {
         let mut state = self
             .state
             .lock()
@@ -177,8 +177,8 @@ async fn capture_output(
         })?;
     drop(output);
     Ok(CapturedOutput {
-        stdout: stdout_capture.take()?,
-        stderr: stderr_capture.take()?,
+        stdout: stdout_capture.take().map_err(Error::Log)?,
+        stderr: stderr_capture.take().map_err(Error::Log)?,
     })
 }
 
@@ -201,7 +201,7 @@ fn error_output(stderr: &[u8]) -> String {
 
 /// Records an execution failure before returning it.
 fn fail_command<T>(log: CommandLog<'_>, error: Error) -> Result<T, Error> {
-    log.fail(&error.to_string())?;
+    log.fail(&error.to_string()).map_err(Error::Log)?;
     Err(error)
 }
 
@@ -294,7 +294,8 @@ impl<'a> Invocation<'a> {
     ) -> Result<T, Error> {
         let mut command_log = self
             .logs
-            .command(&self.label, &self.program, &self.arguments)?;
+            .command(&self.label, &self.program, &self.arguments)
+            .map_err(Error::Log)?;
         let (stdout_log, stderr_log) = command_log.take_outputs();
         let mut process = Command::new(&self.program);
         process
@@ -364,7 +365,7 @@ impl<'a> Invocation<'a> {
             Err(error) => return fail_command(command_log, error),
         };
         if !status.success() {
-            command_log.complete(status)?;
+            command_log.complete(status).map_err(Error::Log)?;
             return Err(Error::CommandFailed {
                 command,
                 status,
@@ -374,7 +375,7 @@ impl<'a> Invocation<'a> {
 
         match consume(output.stdout) {
             Ok(output) => {
-                command_log.complete(status)?;
+                command_log.complete(status).map_err(Error::Log)?;
                 Ok(output)
             }
             Err(source) => fail_command(command_log, Error::CommandOutput { command, source }),

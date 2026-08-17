@@ -4,7 +4,7 @@ use std::{io, path::PathBuf, process::ExitStatus};
 
 use thiserror::Error;
 
-use crate::{inventory::InventoryError, store_path::StorePathError};
+use crate::{inventory::InventoryError, logs::LogError, store_path::StorePathError};
 
 /// Describes failures encountered while deploying hosts.
 #[derive(Debug, Error)]
@@ -63,36 +63,9 @@ pub(crate) enum Error {
         #[source]
         source: std::string::FromUtf8Error,
     },
-    /// Indicates that the operating system has no state directory.
-    #[error("could not determine the user state directory")]
-    StateDirectoryUnavailable,
-    /// Indicates that a log directory could not be created.
-    #[error("failed to create log directory `{}`", path.display())]
-    CreateLogDirectory {
-        /// Identifies the directory.
-        path: PathBuf,
-        /// Contains the filesystem error.
-        #[source]
-        source: io::Error,
-    },
-    /// Indicates that a log file could not be written.
-    #[error("failed to write log `{}`", path.display())]
-    WriteLog {
-        /// Identifies the log file.
-        path: PathBuf,
-        /// Contains the filesystem error.
-        #[source]
-        source: io::Error,
-    },
-    /// Indicates that a completed log directory could not be removed.
-    #[error("failed to remove log directory `{}`", path.display())]
-    RemoveLogDirectory {
-        /// Identifies the directory.
-        path: PathBuf,
-        /// Contains the filesystem error.
-        #[source]
-        source: io::Error,
-    },
+    /// Indicates that a logging operation failed.
+    #[error(transparent)]
+    Log(LogError),
     /// Indicates that an inventory operation failed.
     #[error(transparent)]
     Inventory(InventoryError),

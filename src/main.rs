@@ -83,13 +83,13 @@ async fn main() -> ExitCode {
     let cli = Cli::parse();
     let logs = match RunLog::start(cli.logs, cli.logs_dir.as_deref(), &cli.inventory) {
         Ok(logs) => logs,
-        Err(error) => return report(Err(error), Ok(None)),
+        Err(error) => return report(Err(Error::Log(error)), Ok(None)),
     };
     let result = run(cli, &logs).await;
     let error_message = result
         .as_ref()
         .err()
         .map(|error| error.display_full().to_string());
-    let log_directory = logs.finish(error_message.as_deref());
+    let log_directory = logs.finish(error_message.as_deref()).map_err(Error::Log);
     report(result, log_directory)
 }

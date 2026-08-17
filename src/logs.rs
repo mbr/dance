@@ -6,7 +6,7 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::Mutex,
@@ -14,9 +14,43 @@ use std::{
 };
 
 use clap::ValueEnum;
+use thiserror::Error;
 use uuid::Uuid;
 
-use crate::error::Error;
+/// Describes a failure encountered while recording diagnostics.
+#[derive(Debug, Error)]
+pub(crate) enum LogError {
+    /// Indicates that the operating system has no state directory.
+    #[error("could not determine the user state directory")]
+    StateDirectoryUnavailable,
+    /// Indicates that a log directory could not be created.
+    #[error("failed to create log directory `{}`", path.display())]
+    CreateDirectory {
+        /// Identifies the directory.
+        path: PathBuf,
+        /// Contains the filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// Indicates that a log file could not be written.
+    #[error("failed to write log `{}`", path.display())]
+    Write {
+        /// Identifies the log file.
+        path: PathBuf,
+        /// Contains the filesystem error.
+        #[source]
+        source: io::Error,
+    },
+    /// Indicates that a completed log directory could not be removed.
+    #[error("failed to remove log directory `{}`", path.display())]
+    RemoveDirectory {
+        /// Identifies the directory.
+        path: PathBuf,
+        /// Contains the filesystem error.
+        #[source]
+        source: io::Error,
+    },
+}
 
 /// Selects when completed run logs are retained.
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -39,10 +73,10 @@ pub(crate) struct OutputLog {
 
 impl OutputLog {
     /// Writes output bytes to the diagnostic file.
-    pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), Error> {
+    pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), LogError> {
         self.file
             .write_all(bytes)
-            .map_err(|source| Error::WriteLog {
+            .map_err(|source| LogError::Write {
                 path: self.path.clone(),
                 source,
             })
@@ -95,7 +129,7 @@ impl RunLog {
         mode: LogMode,
         base: Option<&Path>,
         inventory: &Path,
-    ) -> Result<Self, Error> {
+    ) -> Result<Self, LogError> {
         let started = Instant::now();
         if matches!(mode, LogMode::Never) {
             return Ok(Self {
@@ -110,10 +144,10 @@ impl RunLog {
         let base = match base {
             Some(base) => base.to_path_buf(),
             None => state_directory(env::var_os("XDG_STATE_HOME"), dirs::home_dir())
-                .ok_or(Error::StateDirectoryUnavailable)?
+                .ok_or(LogError::StateDirectoryUnavailable)?
                 .join("dance/logs"),
         };
-        fs::create_dir_all(&base).map_err(|source| Error::CreateLogDirectory {
+        fs::create_dir_all(&base).map_err(|source| LogError::CreateDirectory {
             path: base.clone(),
             source,
         })?;
@@ -144,7 +178,7 @@ impl RunLog {
         label: &str,
         program: impl AsRef<OsStr>,
         arguments: &[OsString],
-    ) -> Result<CommandLog<'a>, Error> {
+    ) -> Result<CommandLog<'a>, LogError> {
         let started = Instant::now();
         let Some(directory) = &self.directory else {
             return Ok(CommandLog {
@@ -199,7 +233,7 @@ impl RunLog {
     }
 
     /// Finalizes the run and returns the retained log directory.
-    pub(crate) fn finish(mut self, error: Option<&str>) -> Result<Option<PathBuf>, Error> {
+    pub(crate) fn finish(mut self, error: Option<&str>) -> Result<Option<PathBuf>, LogError> {
         let Some(directory) = self.directory.clone() else {
             self.finished = true;
             return Ok(None);
@@ -214,7 +248,7 @@ impl RunLog {
         ))?;
 
         let retained = if succeeded && matches!(self.mode, LogMode::OnError) {
-            fs::remove_dir_all(&directory).map_err(|source| Error::RemoveLogDirectory {
+            fs::remove_dir_all(&directory).map_err(|source| LogError::RemoveDirectory {
                 path: directory,
                 source,
             })?;
@@ -227,7 +261,7 @@ impl RunLog {
     }
 
     /// Appends one lifecycle event.
-    fn write_event(&self, event: &str) -> Result<(), Error> {
+    fn write_event(&self, event: &str) -> Result<(), LogError> {
         let Some(log) = &self.log else {
             return Ok(());
         };
@@ -250,7 +284,7 @@ impl CommandLog<'_> {
     }
 
     /// Completes the command after its output has been captured.
-    pub(crate) fn complete(mut self, status: ExitStatus) -> Result<(), Error> {
+    pub(crate) fn complete(mut self, status: ExitStatus) -> Result<(), LogError> {
         let Some(id) = self.id else {
             self.finished = true;
             return Ok(());
@@ -272,7 +306,7 @@ impl CommandLog<'_> {
     }
 
     /// Marks the command as failed outside normal process completion.
-    pub(crate) fn fail(mut self, error: &str) -> Result<(), Error> {
+    pub(crate) fn fail(mut self, error: &str) -> Result<(), LogError> {
         let Some(id) = self.id else {
             self.finished = true;
             return Ok(());
@@ -325,14 +359,14 @@ fn elapsed_milliseconds(started: Instant) -> u64 {
 }
 
 /// Creates a uniquely named run directory.
-fn create_run_directory(base: &Path) -> Result<PathBuf, Error> {
+fn create_run_directory(base: &Path) -> Result<PathBuf, LogError> {
     let path = base.join(Uuid::now_v7().to_string());
     let mut builder = fs::DirBuilder::new();
     #[cfg(unix)]
     builder.mode(0o700);
     builder
         .create(&path)
-        .map_err(|source| Error::CreateLogDirectory {
+        .map_err(|source| LogError::CreateDirectory {
             path: path.clone(),
             source,
         })?;
@@ -349,8 +383,8 @@ fn format_arguments(arguments: impl IntoIterator<Item = impl AsRef<OsStr>>) -> S
 }
 
 /// Appends one complete lifecycle event to a locked run file.
-fn write_event(log: &mut RunFile, event: &str) -> Result<(), Error> {
-    writeln!(log.file, "{event}").map_err(|source| Error::WriteLog {
+fn write_event(log: &mut RunFile, event: &str) -> Result<(), LogError> {
+    writeln!(log.file, "{event}").map_err(|source| LogError::Write {
         path: log.path.clone(),
         source,
     })
@@ -376,8 +410,8 @@ fn sanitize(label: &str) -> String {
 }
 
 /// Creates a truncated diagnostic file.
-fn open_log(path: &Path) -> Result<File, Error> {
-    File::create(path).map_err(|source| Error::WriteLog {
+fn open_log(path: &Path) -> Result<File, LogError> {
+    File::create(path).map_err(|source| LogError::Write {
         path: path.to_path_buf(),
         source,
     })
