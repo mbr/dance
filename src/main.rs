@@ -15,21 +15,23 @@ use std::{path::PathBuf, process::ExitCode};
 
 use clap::Parser;
 use display_full_error::DisplayFullErrorExt;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     cli::{Cli, Command},
     error::Error,
     inventory::Inventory,
     logs::RunLog,
+    process::ProcessContext,
 };
 
 /// Runs the selected workflow.
-async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
+async fn run(cli: Cli, processes: &ProcessContext<'_>) -> Result<(), Error> {
     let inventory = Inventory::load(&cli.inventory).map_err(Error::Inventory)?;
     match cli.command {
         Command::Review(args) => {
             let inventory = inventory.select(&args.ids).map_err(Error::Inventory)?;
-            deployment::review(inventory, args.update, logs).await
+            deployment::review(inventory, args.update, processes).await
         }
         Command::Deploy(args) => {
             let inventory = inventory
@@ -44,11 +46,11 @@ async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
                     keep_generations: (!args.no_gc).then_some(args.keep_generations),
                 },
             };
-            deployment::deploy(inventory, options, logs).await
+            deployment::deploy(inventory, options, processes).await
         }
         Command::Verify(args) => {
             let inventory = inventory.select(&args.ids).map_err(Error::Inventory)?;
-            verification::verify(inventory, logs).await
+            verification::verify(inventory, processes).await
         }
     }
 }
@@ -85,7 +87,22 @@ async fn main() -> ExitCode {
         Ok(logs) => logs,
         Err(error) => return report(Err(Error::Log(error)), Ok(None)),
     };
-    let result = run(cli, &logs).await;
+    let result = {
+        let cancellation = CancellationToken::new();
+        let processes = ProcessContext::new(&logs, cancellation.clone());
+        let workflow = run(cli, &processes);
+        tokio::pin!(workflow);
+        tokio::select! {
+            result = &mut workflow => result,
+            signal = tokio::signal::ctrl_c() => {
+                match signal {
+                    Ok(()) => cancellation.cancel(),
+                    Err(source) => eprintln!("error: failed to listen for interruption: {source}"),
+                }
+                workflow.await
+            }
+        }
+    };
     let error_message = result
         .as_ref()
         .err()

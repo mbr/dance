@@ -9,8 +9,7 @@ use serde::Deserialize;
 use crate::{
     error::Error,
     inventory::{Host, Inventory},
-    logs::RunLog,
-    process::Invocation,
+    process::{Invocation, ProcessContext},
     status::{self, DeploymentPhase, ProgressDisplay},
     store_path::StorePath,
 };
@@ -57,11 +56,11 @@ impl Verifier {
     /// Discovers the verifier for one host when configured.
     async fn discover(
         host: &Host,
-        logs: &RunLog,
+        processes: &ProcessContext<'_>,
         progress: &ProgressBar,
     ) -> Result<Option<Self>, Error> {
         let metadata = Invocation::new(
-            logs,
+            processes,
             format!("verify-{}-flake-metadata", host.id()),
             "nix",
             progress,
@@ -83,7 +82,7 @@ impl Verifier {
             "let flakeReference = {flake_reference}; flakeName = {flake_name}; in ({EXPRESSION})"
         );
         let output = Invocation::new(
-            logs,
+            processes,
             format!("verify-{}-evaluate", host.id()),
             "nix",
             progress,
@@ -96,18 +95,33 @@ impl Verifier {
     }
 
     /// Builds the verifier in the local Nix store.
-    async fn build(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
-        Invocation::new(logs, format!("verify-{}-build", host.id()), "nix", progress)
-            .arguments(["build", "--no-link"])
-            .argument(host.verifier_output(&self.system))
-            .status()
-            .await
+    async fn build(
+        &self,
+        host: &Host,
+        processes: &ProcessContext<'_>,
+        progress: &ProgressBar,
+    ) -> Result<(), Error> {
+        Invocation::new(
+            processes,
+            format!("verify-{}-build", host.id()),
+            "nix",
+            progress,
+        )
+        .arguments(["build", "--no-link"])
+        .argument(host.verifier_output(&self.system))
+        .status()
+        .await
     }
 
     /// Runs the built verifier on the deployment machine.
-    async fn run(&self, host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
+    async fn run(
+        &self,
+        host: &Host,
+        processes: &ProcessContext<'_>,
+        progress: &ProgressBar,
+    ) -> Result<(), Error> {
         Invocation::new(
-            logs,
+            processes,
             format!("verify-{}-run", host.id()),
             self.executable(),
             progress,
@@ -156,17 +170,17 @@ pub(crate) enum ConfiguredOutcome {
 /// Discovers, builds, and runs the verifier configured for one host.
 pub(crate) async fn run_configured(
     host: &Host,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<ConfiguredOutcome, Error> {
     status::set_phase(progress, host.id(), DeploymentPhase::BuildingVerifier);
-    let Some(verifier) = Verifier::discover(host, logs, progress).await? else {
+    let Some(verifier) = Verifier::discover(host, processes, progress).await? else {
         return Ok(ConfiguredOutcome::Missing);
     };
-    verifier.build(host, logs, progress).await?;
+    verifier.build(host, processes, progress).await?;
 
     status::set_phase(progress, host.id(), DeploymentPhase::RunningVerifier);
-    verifier.run(host, logs, progress).await?;
+    verifier.run(host, processes, progress).await?;
     Ok(ConfiguredOutcome::Verified)
 }
 
@@ -181,8 +195,12 @@ enum Outcome {
 }
 
 /// Runs the verifier configured for one host.
-async fn verify_host(host: &Host, logs: &RunLog, progress: &ProgressBar) -> Outcome {
-    match run_configured(host, logs, progress).await {
+async fn verify_host(
+    host: &Host,
+    processes: &ProcessContext<'_>,
+    progress: &ProgressBar,
+) -> Outcome {
+    match run_configured(host, processes, progress).await {
         Ok(ConfiguredOutcome::Verified) => {
             status::verified(progress, host.id());
             Outcome::Verified
@@ -196,13 +214,16 @@ async fn verify_host(host: &Host, logs: &RunLog, progress: &ProgressBar) -> Outc
 }
 
 /// Runs configured verifiers for all selected hosts.
-pub(crate) async fn verify(inventory: Inventory, logs: &RunLog) -> Result<(), Error> {
+pub(crate) async fn verify(
+    inventory: Inventory,
+    processes: &ProcessContext<'_>,
+) -> Result<(), Error> {
     let hosts = inventory.into_iter().collect::<Vec<_>>();
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(hosts.iter().map(Host::id));
     let outcomes = join_all(hosts.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
-            let outcome = verify_host(&host, logs, progress).await;
+            let outcome = verify_host(&host, processes, progress).await;
             if matches!(&outcome, Outcome::Failed(_)) {
                 status::fail(progress);
             }

@@ -7,7 +7,7 @@ use indicatif::ProgressBar;
 use super::{ActivationOptions, operations, review::ReviewedHost, rollback};
 use crate::{
     error::Error,
-    logs::RunLog,
+    process::ProcessContext,
     status::{self, DeploymentPhase},
     verification,
 };
@@ -117,7 +117,7 @@ async fn fail(
     options: ActivationOptions,
     persistence: rollback::Persistence,
     trigger: Error,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Outcome {
     if !options.rollback {
@@ -129,7 +129,7 @@ async fn fail(
         &reviewed.host,
         &reviewed.deployed,
         persistence,
-        logs,
+        processes,
         progress,
     )
     .await
@@ -147,44 +147,44 @@ async fn fail(
 pub(super) async fn activate(
     reviewed: &ReviewedHost,
     options: ActivationOptions,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Outcome {
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Testing);
-    if let Err(error) = operations::test(&reviewed.host, logs, progress).await {
+    if let Err(error) = operations::test(&reviewed.host, processes, progress).await {
         return fail(
             reviewed,
             options,
             rollback::Persistence::Runtime,
             error,
-            logs,
+            processes,
             progress,
         )
         .await;
     }
 
     if options.include_verifier
-        && let Err(error) = verification::run_configured(&reviewed.host, logs, progress).await
+        && let Err(error) = verification::run_configured(&reviewed.host, processes, progress).await
     {
         return fail(
             reviewed,
             options,
             rollback::Persistence::Runtime,
             error,
-            logs,
+            processes,
             progress,
         )
         .await;
     }
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Switching);
-    if let Err(error) = operations::switch(&reviewed.host, logs, progress).await {
+    if let Err(error) = operations::switch(&reviewed.host, processes, progress).await {
         return fail(
             reviewed,
             options,
             rollback::Persistence::System,
             error,
-            logs,
+            processes,
             progress,
         )
         .await;
@@ -197,7 +197,7 @@ pub(super) async fn activate(
             DeploymentPhase::CollectingGarbage,
         );
         if let Err(error) =
-            operations::collect_garbage(&reviewed.host, keep_generations, logs, progress).await
+            operations::collect_garbage(&reviewed.host, keep_generations, processes, progress).await
         {
             return Outcome::CleanupFailed(error);
         }

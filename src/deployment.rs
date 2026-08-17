@@ -21,7 +21,7 @@ use self::{
 use crate::{
     error::Error,
     inventory::Inventory,
-    logs::RunLog,
+    process::ProcessContext,
     status::{self, ProgressDisplay},
     update::{self, UpdateOutcome},
 };
@@ -60,9 +60,9 @@ struct ReviewResult {
 pub(crate) async fn review(
     inventory: Inventory,
     update_flakes: bool,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
 ) -> Result<(), Error> {
-    let result = collect(inventory, update_flakes, logs).await?;
+    let result = collect(inventory, update_flakes, processes).await?;
     result.first_error.map_or(Ok(()), Err)
 }
 
@@ -70,12 +70,12 @@ pub(crate) async fn review(
 pub(crate) async fn deploy(
     inventory: Inventory,
     options: DeployOptions,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
 ) -> Result<(), Error> {
     let ReviewResult {
         outdated,
         first_error,
-    } = collect(inventory, options.update_flakes, logs).await?;
+    } = collect(inventory, options.update_flakes, processes).await?;
     if outdated.is_empty() {
         return first_error.map_or(Ok(()), Err);
     }
@@ -84,7 +84,7 @@ pub(crate) async fn deploy(
         return first_error.map_or(Ok(()), Err);
     }
 
-    let activation = activate(outdated, options.activation, logs).await;
+    let activation = activate(outdated, options.activation, processes).await;
     first_error.map_or(activation, Err)
 }
 
@@ -92,7 +92,7 @@ pub(crate) async fn deploy(
 async fn collect(
     inventory: Inventory,
     update_flakes: bool,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
 ) -> Result<ReviewResult, Error> {
     let flakes = inventory.flake_groups();
     let hosts = inventory.into_iter().collect::<Vec<_>>();
@@ -101,11 +101,11 @@ async fn collect(
     let deployed = join_all(
         hosts
             .iter()
-            .map(|host| review::deployed(host, logs, &progress)),
+            .map(|host| review::deployed(host, processes, &progress)),
     );
     let local = async {
         let updates = if update_flakes {
-            update::flakes(flakes, logs, &progress).await
+            update::flakes(flakes, processes, &progress).await
         } else {
             UpdateOutcome::default()
         };
@@ -114,7 +114,7 @@ async fn collect(
                 review::skip_expected(host, &progress);
                 None
             } else {
-                Some(review::expected(host, logs, &progress).await)
+                Some(review::expected(host, processes, &progress).await)
             }
         }))
         .await;
@@ -189,13 +189,13 @@ fn confirm() -> Result<bool, Error> {
 async fn activate(
     reviewed: Vec<ReviewedHost>,
     options: ActivationOptions,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
 ) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
     let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).map(
         |(host, progress)| async move {
-            let outcome = activation::activate(&host, options, logs, progress).await;
+            let outcome = activation::activate(&host, options, processes, progress).await;
             outcome.finish_progress(host.id(), progress);
             outcome
         },

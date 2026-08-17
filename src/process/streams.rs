@@ -1,18 +1,16 @@
-//! Subprocess stream capture and progress reporting.
+//! Subprocess output capture and progress reporting.
 
 use std::{
-    io,
     sync::{Arc, Mutex},
     time::Duration,
 };
 
-use futures::{Stream, StreamExt, stream};
 use indicatif::ProgressBar;
-use tokio::{
-    io::AsyncRead,
-    time::{self, Instant, MissedTickBehavior},
+use tokio::time;
+use tokio_process_tools::{
+    Chunk, Consumable, Consumer, Delivery, Next, Replay, SingleSubscriberOutputStream,
+    StreamVisitor,
 };
-use tokio_util::io::{InspectReader, ReaderStream};
 
 use super::ProcessError;
 use crate::{
@@ -22,11 +20,8 @@ use crate::{
 
 /// Limits how often subprocess output changes a progress message.
 const OUTPUT_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
-
-/// Contains a callback used to retain inspected bytes.
-type Inspector = Box<dyn FnMut(&[u8]) + Send>;
-/// Contains a chunk stream whose underlying bytes are retained.
-type CapturedChunks<R> = ReaderStream<InspectReader<R, Inspector>>;
+/// Limits output draining after the child process exits.
+const OUTPUT_EOF_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Contains the separately captured subprocess output streams.
 pub(super) struct CapturedOutput {
@@ -36,67 +31,154 @@ pub(super) struct CapturedOutput {
     pub(super) stderr: Vec<u8>,
 }
 
-/// Contains the sinks fed by one output stream.
-struct CaptureState {
+/// Captures, logs, and reports one subprocess output stream.
+struct Capture {
     /// Retains output for command results and errors.
     bytes: Vec<u8>,
     /// Writes output to persistent diagnostics when enabled.
     log: Option<OutputLog>,
     /// Retains the first diagnostic write failure.
     error: Option<LogError>,
+    /// Shares the latest progress record across output streams.
+    latest: Arc<Mutex<Option<String>>>,
 }
 
-/// Retains and optionally logs bytes inspected from one output stream.
-#[derive(Clone)]
-struct Capture {
-    /// Shares output sinks with the inspection callback.
-    state: Arc<Mutex<CaptureState>>,
-}
+impl StreamVisitor for Capture {
+    type Output = Result<Vec<u8>, LogError>;
 
-impl Capture {
-    /// Creates output sinks for one stream.
-    fn new(log: Option<OutputLog>) -> Self {
-        Self {
-            state: Arc::new(Mutex::new(CaptureState {
-                bytes: Vec::new(),
-                log,
-                error: None,
-            })),
+    /// Processes one raw output chunk.
+    fn on_chunk(&mut self, chunk: Chunk) -> Next {
+        let bytes = chunk.as_ref();
+        self.bytes.extend_from_slice(bytes);
+        if self.error.is_none()
+            && let Some(log) = &mut self.log
+            && let Err(error) = log.write(bytes)
+        {
+            self.error = Some(error);
         }
-    }
-
-    /// Wraps a reader and tees every supplied byte into its sinks.
-    fn chunks<R>(&self, reader: R) -> CapturedChunks<R>
-    where
-        R: AsyncRead + Unpin,
-    {
-        let capture = self.clone();
-        let inspector: Inspector = Box::new(move |bytes| {
-            let mut state = capture
-                .state
+        if let Some(message) = display_message(bytes) {
+            *self
+                .latest
                 .lock()
-                .expect("output capture lock should not be poisoned");
-            state.bytes.extend_from_slice(bytes);
-            if state.error.is_none() {
-                let result = state.log.as_mut().map(|log| log.write(bytes));
-                if let Some(Err(error)) = result {
-                    state.error = Some(error);
-                }
-            }
-        });
-        ReaderStream::new(InspectReader::new(reader, inspector))
+                .expect("progress output lock should not be poisoned") = Some(message);
+        }
+        Next::Continue
     }
 
-    /// Takes retained bytes or the first diagnostic failure.
-    fn take(self) -> Result<Vec<u8>, LogError> {
-        let mut state = self
-            .state
-            .lock()
-            .expect("output capture lock should not be poisoned");
-        match state.error.take() {
-            Some(error) => Err(error),
-            None => Ok(std::mem::take(&mut state.bytes)),
+    /// Returns captured bytes or the diagnostic write failure.
+    fn into_output(self) -> Self::Output {
+        self.error.map_or(Ok(self.bytes), Err)
+    }
+}
+
+/// Owns consumers attached to a subprocess's output streams.
+pub(super) struct OutputConsumers {
+    /// Captures standard output.
+    stdout: Consumer<Result<Vec<u8>, LogError>>,
+    /// Captures standard error.
+    stderr: Consumer<Result<Vec<u8>, LogError>>,
+    /// Retains the latest displayable output record.
+    latest: Arc<Mutex<Option<String>>>,
+}
+
+impl OutputConsumers {
+    /// Attaches consumers to both output streams.
+    pub(super) fn attach<D, R>(
+        stdout: &SingleSubscriberOutputStream<D, R>,
+        stderr: &SingleSubscriberOutputStream<D, R>,
+        stdout_log: Option<OutputLog>,
+        stderr_log: Option<OutputLog>,
+    ) -> Self
+    where
+        D: Delivery,
+        R: Replay,
+    {
+        let latest = Arc::new(Mutex::new(None));
+        Self {
+            stdout: attach(stdout, stdout_log, Arc::clone(&latest)),
+            stderr: attach(stderr, stderr_log, Arc::clone(&latest)),
+            latest,
         }
+    }
+
+    /// Creates the timer used to coalesce progress updates.
+    pub(super) fn refresh_interval(&self) -> time::Interval {
+        let mut interval = time::interval(OUTPUT_REFRESH_INTERVAL);
+        interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
+        interval
+    }
+
+    /// Displays the latest observed subprocess output.
+    pub(super) fn refresh(&self, progress: &ProgressBar) {
+        refresh_progress(&self.latest, progress);
+    }
+
+    /// Drains both output streams and returns their captured bytes.
+    pub(super) async fn finish(
+        self,
+        command: &str,
+        progress: &ProgressBar,
+    ) -> Result<CapturedOutput, Error> {
+        let latest = Arc::clone(&self.latest);
+        let completion = async {
+            let (stdout, stderr) = tokio::join!(self.stdout.wait(), self.stderr.wait());
+            let stdout = stdout
+                .map_err(|source| output_read_error(command, source))?
+                .map_err(Error::Log)?;
+            let stderr = stderr
+                .map_err(|source| output_read_error(command, source))?
+                .map_err(Error::Log)?;
+            Ok(CapturedOutput { stdout, stderr })
+        };
+        let output = time::timeout(OUTPUT_EOF_TIMEOUT, completion)
+            .await
+            .map_err(|_elapsed| {
+                Error::Process(ProcessError::OutputDrainTimedOut {
+                    command: command.to_owned(),
+                    seconds: OUTPUT_EOF_TIMEOUT.as_secs(),
+                })
+            })??;
+        refresh_progress(&latest, progress);
+        Ok(output)
+    }
+}
+
+/// Attaches one output consumer.
+fn attach<D, R>(
+    stream: &SingleSubscriberOutputStream<D, R>,
+    log: Option<OutputLog>,
+    latest: Arc<Mutex<Option<String>>>,
+) -> Consumer<Result<Vec<u8>, LogError>>
+where
+    D: Delivery,
+    R: Replay,
+{
+    stream
+        .consume(Capture {
+            bytes: Vec::new(),
+            log,
+            error: None,
+            latest,
+        })
+        .expect("the output stream should not have another consumer")
+}
+
+/// Wraps an output consumer failure with command context.
+fn output_read_error(command: &str, source: tokio_process_tools::ConsumerError) -> Error {
+    Error::Process(ProcessError::OutputRead {
+        command: command.to_owned(),
+        source,
+    })
+}
+
+/// Displays the latest output retained for progress reporting.
+fn refresh_progress(latest: &Mutex<Option<String>>, progress: &ProgressBar) {
+    if let Some(message) = latest
+        .lock()
+        .expect("progress output lock should not be poisoned")
+        .take()
+    {
+        progress.set_message(message);
     }
 }
 
@@ -108,111 +190,17 @@ fn display_message(record: &[u8]) -> Option<String> {
         .map(str::to_owned)
 }
 
-/// Consumes merged output while periodically displaying its latest line.
-async fn display_output<B>(
-    output: &mut (impl Stream<Item = io::Result<B>> + Unpin),
-    progress: &ProgressBar,
-) -> io::Result<()>
-where
-    B: AsRef<[u8]>,
-{
-    let mut latest = None;
-    let mut refresh = time::interval_at(
-        Instant::now() + OUTPUT_REFRESH_INTERVAL,
-        OUTPUT_REFRESH_INTERVAL,
-    );
-    refresh.set_missed_tick_behavior(MissedTickBehavior::Skip);
-
-    loop {
-        tokio::select! {
-            record = output.next() => {
-                match record {
-                    Some(Ok(record)) => {
-                        if let Some(message) = display_message(record.as_ref()) {
-                            latest = Some(message);
-                        }
-                    }
-                    Some(Err(source)) => return Err(source),
-                    None => break,
-                }
-            }
-            _ = refresh.tick() => {
-                if let Some(message) = latest.take() {
-                    progress.set_message(message);
-                }
-            }
-        }
-    }
-
-    if let Some(message) = latest {
-        progress.set_message(message);
-    }
-    Ok(())
-}
-
-/// Captures two output streams while displaying their merged lines.
-pub(super) async fn capture_output(
-    stdout: impl AsyncRead + Unpin,
-    stderr: impl AsyncRead + Unpin,
-    stdout_log: Option<OutputLog>,
-    stderr_log: Option<OutputLog>,
-    command: &str,
-    progress: &ProgressBar,
-) -> Result<CapturedOutput, Error> {
-    let stdout_capture = Capture::new(stdout_log);
-    let stderr_capture = Capture::new(stderr_log);
-    let stdout = stdout_capture.chunks(stdout);
-    let stderr = stderr_capture.chunks(stderr);
-    let mut output = stream::select(stdout, stderr);
-    display_output(&mut output, progress)
-        .await
-        .map_err(|source| {
-            Error::Process(ProcessError::OutputRead {
-                command: command.to_owned(),
-                source,
-            })
-        })?;
-    drop(output);
-    Ok(CapturedOutput {
-        stdout: stdout_capture.take().map_err(Error::Log)?,
-        stderr: stderr_capture.take().map_err(Error::Log)?,
-    })
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    use super::display_message;
 
-    use indicatif::ProgressBar;
-    use tokio::{io::AsyncWriteExt, time};
-
-    use super::{OUTPUT_REFRESH_INTERVAL, capture_output};
-
-    /// Checks that merged lines are coalesced without mixing captured streams.
-    #[tokio::test]
-    async fn merged_output_is_captured_and_coalesced() {
-        let (mut stdout_writer, stdout) = tokio::io::duplex(64);
-        let (mut stderr_writer, stderr) = tokio::io::duplex(64);
-        let writing = async move {
-            stderr_writer
-                .write_all(b"building\n")
-                .await
-                .expect("standard error should be written");
-            time::sleep(Duration::from_millis(20)).await;
-            stdout_writer
-                .write_all(b"result")
-                .await
-                .expect("standard output should be written");
-            drop(stdout_writer);
-            time::sleep(OUTPUT_REFRESH_INTERVAL + Duration::from_millis(20)).await;
-        };
-        let progress = ProgressBar::hidden();
-        let capture = capture_output(stdout, stderr, None, None, "test", &progress);
-
-        let ((), output) = tokio::join!(writing, capture);
-        let output = output.expect("output should be captured");
-        assert_eq!(output.stdout, b"result");
-        assert_eq!(output.stderr, b"building\n");
-        assert_eq!(progress.message(), "result");
+    /// Checks carriage-return and newline progress extraction.
+    #[test]
+    fn display_message_uses_the_last_nonempty_record() {
+        assert_eq!(
+            display_message(b"building\rchecking\n\n"),
+            Some("checking".to_owned())
+        );
+        assert_eq!(display_message(b"\r\n"), None);
     }
 }

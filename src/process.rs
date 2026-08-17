@@ -3,21 +3,19 @@
 mod streams;
 
 use std::{
-    ffi::OsString,
-    io,
-    process::{ExitStatus, Stdio},
-    string::FromUtf8Error,
-    time::Duration,
+    ffi::OsString, future::IntoFuture, process::ExitStatus, string::FromUtf8Error, time::Duration,
 };
 
 use indicatif::ProgressBar;
 use thiserror::Error;
-use tokio::{
-    process::Command,
-    time,
+use tokio::process::Command;
+use tokio_process_tools::{
+    ConsumerError, DEFAULT_MAX_BUFFERED_CHUNKS, DEFAULT_READ_CHUNK_SIZE, GracefulShutdown, Process,
+    SpawnError, TerminationError, WaitForCompletionOrTerminateResult, WaitOrTerminateError,
 };
+use tokio_util::sync::CancellationToken;
 
-use self::streams::capture_output;
+use self::streams::OutputConsumers;
 use crate::{
     error::Error,
     logs::{CommandLog, RunLog},
@@ -31,27 +29,44 @@ pub(crate) enum ProcessError {
     Spawn {
         /// Shows the attempted command.
         command: String,
-        /// Contains the operating-system error.
+        /// Contains the process creation error.
         #[source]
-        source: io::Error,
+        source: SpawnError,
     },
-    /// Indicates that a command could not be awaited.
+    /// Indicates that a command could not be awaited or cleaned up.
     #[error("failed to wait for `{command}`")]
     Wait {
         /// Shows the attempted command.
         command: String,
-        /// Contains the operating-system error.
+        /// Contains the process lifecycle error.
         #[source]
-        source: io::Error,
+        source: WaitOrTerminateError,
+    },
+    /// Indicates that a command could not be terminated after interruption.
+    #[error("failed to terminate `{command}`")]
+    Terminate {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the process termination error.
+        #[source]
+        source: TerminationError,
     },
     /// Indicates that command output could not be read.
     #[error("failed to read output from `{command}`")]
     OutputRead {
         /// Shows the attempted command.
         command: String,
-        /// Contains the input/output error.
+        /// Contains the output consumer error.
         #[source]
-        source: io::Error,
+        source: ConsumerError,
+    },
+    /// Indicates that command output did not close after process exit.
+    #[error("output from `{command}` did not close after {seconds} seconds")]
+    OutputDrainTimedOut {
+        /// Shows the attempted command.
+        command: String,
+        /// Contains the output drain deadline in seconds.
+        seconds: u64,
     },
     /// Indicates that a command returned a failure status.
     #[error("`{command}` exited with {status}: {stderr}")]
@@ -71,6 +86,12 @@ pub(crate) enum ProcessError {
         /// Contains the configured deadline in seconds.
         seconds: u64,
     },
+    /// Indicates that command execution was interrupted.
+    #[error("`{command}` was interrupted")]
+    Interrupted {
+        /// Shows the attempted command.
+        command: String,
+    },
     /// Indicates that command output was not UTF-8.
     #[error("`{command}` returned non-UTF-8 output")]
     Output {
@@ -84,6 +105,35 @@ pub(crate) enum ProcessError {
 
 /// Limits subprocess diagnostics included in terminal errors.
 const ERROR_OUTPUT_LINES: usize = 20;
+/// Bounds commands without a routine execution deadline.
+const MAX_COMMAND_RUNTIME: Duration = Duration::from_secs(365 * 24 * 60 * 60);
+/// Allows subprocesses to handle graceful termination.
+const TERMINATION_GRACE: Duration = Duration::from_secs(2);
+
+/// Shares subprocess services across one application run.
+pub(crate) struct ProcessContext<'a> {
+    /// Provides persistent command diagnostics.
+    logs: &'a RunLog,
+    /// Signals that active commands should terminate.
+    cancellation: CancellationToken,
+}
+
+impl<'a> ProcessContext<'a> {
+    /// Creates subprocess services for one application run.
+    pub(crate) fn new(logs: &'a RunLog, cancellation: CancellationToken) -> Self {
+        Self { logs, cancellation }
+    }
+}
+
+/// Describes how a process wait completed.
+enum Completion {
+    /// Contains a normal child exit status.
+    Exited(ExitStatus),
+    /// Indicates that the execution deadline initiated termination.
+    TimedOut,
+    /// Indicates that application interruption initiated termination.
+    Interrupted,
+}
 
 /// Returns the trailing standard-error lines for concise diagnostics.
 fn error_output(stderr: &[u8]) -> String {
@@ -108,10 +158,26 @@ fn fail_command<T>(log: CommandLog<'_>, error: Error) -> Result<T, Error> {
     Err(error)
 }
 
+/// Creates the policy used after a command deadline expires.
+fn timeout_shutdown() -> GracefulShutdown {
+    GracefulShutdown::builder()
+        .unix_sigterm(TERMINATION_GRACE)
+        .windows_ctrl_break(TERMINATION_GRACE)
+        .build()
+}
+
+/// Creates the policy used after application interruption.
+fn interruption_shutdown() -> GracefulShutdown {
+    GracefulShutdown::builder()
+        .unix_sigint(TERMINATION_GRACE)
+        .windows_ctrl_break(TERMINATION_GRACE)
+        .build()
+}
+
 /// Configures and executes one logged subprocess.
 pub(crate) struct Invocation<'a> {
-    /// Provides the command's diagnostic record.
-    logs: &'a RunLog,
+    /// Shares run-scoped process services.
+    context: &'a ProcessContext<'a>,
     /// Describes the command's role in the workflow.
     label: String,
     /// Identifies the executable.
@@ -127,15 +193,15 @@ pub(crate) struct Invocation<'a> {
 }
 
 impl<'a> Invocation<'a> {
-    /// Creates an unbounded command without arguments or environment additions.
+    /// Creates a command without arguments or environment additions.
     pub(crate) fn new(
-        logs: &'a RunLog,
+        context: &'a ProcessContext<'a>,
         label: impl Into<String>,
         program: impl Into<OsString>,
         progress: &'a ProgressBar,
     ) -> Self {
         Self {
-            logs,
+            context,
             label: label.into(),
             program: program.into(),
             arguments: Vec::new(),
@@ -196,84 +262,125 @@ impl<'a> Invocation<'a> {
         consume: impl FnOnce(Vec<u8>) -> Result<T, FromUtf8Error>,
     ) -> Result<T, Error> {
         let mut command_log = self
+            .context
             .logs
             .command(&self.label, &self.program, &self.arguments)
             .map_err(Error::Log)?;
         let (stdout_log, stderr_log) = command_log.take_outputs();
-        let mut process = Command::new(&self.program);
-        process
+        let mut command = Command::new(&self.program);
+        command
             .args(&self.arguments)
-            .envs(self.environment.iter().map(|(name, value)| (name, value)))
-            .kill_on_drop(true)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped());
-        let command = format!("{:?}", process.as_std());
-        let mut process = match process.spawn() {
+            .envs(self.environment.iter().map(|(name, value)| (name, value)));
+        let command_display = format!("{:?}", command.as_std());
+        if self.context.cancellation.is_cancelled() {
+            return fail_command(
+                command_log,
+                Error::Process(ProcessError::Interrupted {
+                    command: command_display,
+                }),
+            );
+        }
+        let mut process = match Process::new(command)
+            .name(self.label.clone())
+            .stdout_and_stderr(|stream| {
+                stream
+                    .single_subscriber()
+                    .reliable_with_backpressure()
+                    .replay_all()
+                    .read_chunk_size(DEFAULT_READ_CHUNK_SIZE)
+                    .max_buffered_chunks(DEFAULT_MAX_BUFFERED_CHUNKS)
+            })
+            .spawn()
+        {
             Ok(process) => process,
             Err(source) => {
                 return fail_command(
                     command_log,
-                    Error::Process(ProcessError::Spawn { command, source }),
-                );
-            }
-        };
-        let stdout = process
-            .stdout
-            .take()
-            .expect("piped standard output should be available");
-        let stderr = process
-            .stderr
-            .take()
-            .expect("piped standard error should be available");
-
-        let completion = async {
-            tokio::join!(
-                process.wait(),
-                capture_output(
-                    stdout,
-                    stderr,
-                    stdout_log,
-                    stderr_log,
-                    &command,
-                    self.progress,
-                )
-            )
-        };
-        let (status, output) = match self.timeout {
-            Some(limit) => match time::timeout(limit, completion).await {
-                Ok(completion) => completion,
-                Err(_elapsed) => {
-                    return fail_command(
-                        command_log,
-                        Error::Process(ProcessError::TimedOut {
-                            command: command.clone(),
-                            seconds: limit.as_secs(),
-                        }),
-                    );
-                }
-            },
-            None => completion.await,
-        };
-        let status = match status {
-            Ok(status) => status,
-            Err(source) => {
-                return fail_command(
-                    command_log,
-                    Error::Process(ProcessError::Wait {
-                        command: command.clone(),
+                    Error::Process(ProcessError::Spawn {
+                        command: command_display,
                         source,
                     }),
                 );
             }
         };
-        let output = match output {
+        let consumers =
+            OutputConsumers::attach(process.stdout(), process.stderr(), stdout_log, stderr_log);
+        process.seal_output_replay();
+        let mut refresh = consumers.refresh_interval();
+        let limit = self.timeout.unwrap_or(MAX_COMMAND_RUNTIME);
+        let wait_result = {
+            let wait = process
+                .wait_for_completion(limit)
+                .or_terminate(timeout_shutdown())
+                .into_future();
+            tokio::pin!(wait);
+            loop {
+                tokio::select! {
+                    result = &mut wait => break Some(result),
+                    () = self.context.cancellation.cancelled() => break None,
+                    _ = refresh.tick() => consumers.refresh(self.progress),
+                }
+            }
+        };
+        let completion = match wait_result {
+            Some(Ok(WaitForCompletionOrTerminateResult::Completed(status))) => {
+                Completion::Exited(status)
+            }
+            Some(Ok(WaitForCompletionOrTerminateResult::TerminatedAfterTimeout { .. })) => {
+                Completion::TimedOut
+            }
+            Some(Err(source)) => {
+                process.must_not_be_terminated();
+                return fail_command(
+                    command_log,
+                    Error::Process(ProcessError::Wait {
+                        command: command_display,
+                        source,
+                    }),
+                );
+            }
+            None => match process.terminate(interruption_shutdown()).await {
+                Ok(_status) => Completion::Interrupted,
+                Err(source) => {
+                    process.must_not_be_terminated();
+                    return fail_command(
+                        command_log,
+                        Error::Process(ProcessError::Terminate {
+                            command: command_display,
+                            source,
+                        }),
+                    );
+                }
+            },
+        };
+        let output = match consumers.finish(&command_display, self.progress).await {
             Ok(output) => output,
             Err(error) => return fail_command(command_log, error),
+        };
+        let status = match completion {
+            Completion::TimedOut => {
+                return fail_command(
+                    command_log,
+                    Error::Process(ProcessError::TimedOut {
+                        command: command_display,
+                        seconds: limit.as_secs(),
+                    }),
+                );
+            }
+            Completion::Interrupted => {
+                return fail_command(
+                    command_log,
+                    Error::Process(ProcessError::Interrupted {
+                        command: command_display,
+                    }),
+                );
+            }
+            Completion::Exited(status) => status,
         };
         if !status.success() {
             command_log.complete(status).map_err(Error::Log)?;
             return Err(Error::Process(ProcessError::Failed {
-                command,
+                command: command_display,
                 status,
                 stderr: error_output(&output.stderr),
             }));
@@ -286,7 +393,10 @@ impl<'a> Invocation<'a> {
             }
             Err(source) => fail_command(
                 command_log,
-                Error::Process(ProcessError::Output { command, source }),
+                Error::Process(ProcessError::Output {
+                    command: command_display,
+                    source,
+                }),
             ),
         }
     }
@@ -298,16 +408,17 @@ mod tests {
 
     use indicatif::ProgressBar;
     use tempfile::tempdir;
+    use tokio_util::sync::CancellationToken;
 
-    use super::{Invocation, ProcessError};
+    use super::{Invocation, ProcessContext, ProcessError};
     use crate::{
         error::Error,
         logs::{LogMode, RunLog},
     };
 
-    /// Checks that bounded subprocesses are terminated and reported distinctly.
+    /// Checks bounded termination and explicit cancellation reporting.
     #[tokio::test]
-    async fn bounded_commands_report_timeouts() {
+    async fn commands_report_timeouts_and_interruption() {
         let logs = RunLog::start(
             LogMode::Never,
             None,
@@ -315,46 +426,75 @@ mod tests {
         )
         .expect("disabled logs should start");
         let progress = ProgressBar::hidden();
-        let result = Invocation::new(&logs, "timeout", "sh", &progress)
+        let timeout_cancellation = CancellationToken::new();
+        let timeout_context = ProcessContext::new(&logs, timeout_cancellation);
+        let timeout = Invocation::new(&timeout_context, "timeout", "sh", &progress)
             .arguments(["-c", "sleep 10"])
             .timeout(Duration::from_millis(20))
             .status()
             .await;
-
         assert!(matches!(
-            result,
+            timeout,
             Err(Error::Process(ProcessError::TimedOut { .. }))
         ));
-        logs.finish(Some("timed out"))
+
+        let cancellation = CancellationToken::new();
+        let interrupted_context = ProcessContext::new(&logs, cancellation.clone());
+        let interrupt = async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            cancellation.cancel();
+        };
+        let command = Invocation::new(&interrupted_context, "interrupted", "sh", &progress)
+            .arguments(["-c", "sleep 10"])
+            .status();
+        let ((), interrupted) = tokio::join!(interrupt, command);
+        assert!(matches!(
+            interrupted,
+            Err(Error::Process(ProcessError::Interrupted { .. }))
+        ));
+        drop((timeout_context, interrupted_context));
+        logs.finish(Some("timed out or interrupted"))
             .expect("disabled logs should finish");
     }
 
-    /// Checks that output decoding failures are reflected in command metadata.
+    /// Checks that output decoding failures are reported.
     #[tokio::test]
-    async fn invalid_command_output_is_recorded_as_failed() {
+    async fn invalid_command_output_is_reported() {
         let base = tempdir().expect("temporary directory should be created");
         let logs = RunLog::start(
             LogMode::Always,
             Some(base.path()),
             Path::new("inventory.toml"),
         )
-        .expect("run log should start");
+        .expect("enabled logs should start");
         let progress = ProgressBar::hidden();
-        Invocation::new(&logs, "ignored-output", "sh", &progress)
+        let context = ProcessContext::new(&logs, CancellationToken::new());
+        Invocation::new(&context, "ignored-output", "sh", &progress)
             .arguments(["-c", "printf '\\377'"])
             .status()
             .await
             .expect("discarded output should not require UTF-8");
-        let result = Invocation::new(&logs, "invalid-output", "sh", &progress)
+        let result = Invocation::new(&context, "invalid-output", "sh", &progress)
             .arguments(["-c", "printf '\\377'"])
             .output()
             .await;
         let error = result.expect_err("non-UTF-8 output should fail");
         assert!(matches!(error, Error::Process(ProcessError::Output { .. })));
+        drop(context);
         let directory = logs
             .finish(Some("invalid output"))
-            .expect("run log should finish")
+            .expect("enabled logs should finish")
             .expect("always logs should be retained");
+        assert_eq!(
+            fs::read(directory.join("001-ignored-output.stdout"))
+                .expect("ignored output log should be readable"),
+            [0xff]
+        );
+        assert_eq!(
+            fs::read(directory.join("002-invalid-output.stdout"))
+                .expect("invalid output log should be readable"),
+            [0xff]
+        );
         let run = fs::read_to_string(directory.join("run.log"))
             .expect("lifecycle log should be readable");
         assert!(run.contains("command 002 failed duration_ms="));

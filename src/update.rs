@@ -8,7 +8,10 @@ use std::{
 use futures::future::join_all;
 use indicatif::ProgressBar;
 
-use crate::{error::Error, logs::RunLog, process::Invocation};
+use crate::{
+    error::Error,
+    process::{Invocation, ProcessContext},
+};
 
 /// Contains the failures from a group of flake updates.
 #[derive(Default)]
@@ -35,14 +38,19 @@ impl UpdateOutcome {
 async fn flake(
     path: PathBuf,
     host_count: usize,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> (PathBuf, Result<(), Error>) {
-    let result = Invocation::new(logs, format!("update-{}", path.display()), "nix", progress)
-        .arguments(["flake", "update", "--flake"])
-        .argument(path.as_os_str())
-        .status()
-        .await;
+    let result = Invocation::new(
+        processes,
+        format!("update-{}", path.display()),
+        "nix",
+        progress,
+    )
+    .arguments(["flake", "update", "--flake"])
+    .argument(path.as_os_str())
+    .status()
+    .await;
     let status = if result.is_ok() { "updated" } else { "failed" };
     progress.set_message(format!("{}: inputs {status}", path.display()));
     progress.inc(u64::try_from(host_count).expect("host count should fit in u64"));
@@ -52,13 +60,13 @@ async fn flake(
 /// Updates distinct flakes concurrently and collects their failures.
 pub(crate) async fn flakes(
     flakes: Vec<(PathBuf, usize)>,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> UpdateOutcome {
     let results = join_all(
         flakes
             .into_iter()
-            .map(|(path, host_count)| flake(path, host_count, logs, progress)),
+            .map(|(path, host_count)| flake(path, host_count, processes, progress)),
     )
     .await;
     let mut outcome = UpdateOutcome::default();

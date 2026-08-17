@@ -4,7 +4,10 @@ use indicatif::ProgressBar;
 
 use super::operations::SSH_TIMEOUT;
 use crate::{
-    error::Error, inventory::Host, logs::RunLog, process::Invocation, store_path::StorePath,
+    error::Error,
+    inventory::Host,
+    process::{Invocation, ProcessContext},
+    store_path::StorePath,
 };
 
 /// Selects whether restoration also repairs the persistent system profile.
@@ -20,14 +23,14 @@ pub(super) async fn restore(
     host: &Host,
     previous: &StorePath,
     persistence: Persistence,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
     let action = match persistence {
         Persistence::Runtime => "test",
         Persistence::System => {
             Invocation::new(
-                logs,
+                processes,
                 format!("deploy-{}-rollback-profile", host.id()),
                 "ssh",
                 progress,
@@ -44,7 +47,7 @@ pub(super) async fn restore(
     };
 
     Invocation::new(
-        logs,
+        processes,
         format!("deploy-{}-rollback-activate", host.id()),
         "ssh",
         progress,

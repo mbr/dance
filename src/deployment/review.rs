@@ -8,7 +8,7 @@ use std::{
 use indicatif::ProgressBar;
 
 use super::operations;
-use crate::{error::Error, inventory::Host, logs::RunLog, store_path::StorePath};
+use crate::{error::Error, inventory::Host, process::ProcessContext, store_path::StorePath};
 
 /// Describes a host's state during deployment review.
 #[derive(Clone, Copy)]
@@ -128,14 +128,14 @@ async fn collect_step<T, E>(
 /// Collects the system currently active on one host.
 pub(super) async fn deployed(
     host: &Host,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<StorePath, Error> {
     collect_step(
         progress,
         host.id(),
         "remote",
-        operations::deployed_store_path(host, logs, progress),
+        operations::deployed_store_path(host, processes, progress),
     )
     .await
 }
@@ -143,14 +143,14 @@ pub(super) async fn deployed(
 /// Collects the system expected from one host's local configuration.
 pub(super) async fn expected(
     host: &Host,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<StorePath, Error> {
     collect_step(
         progress,
         host.id(),
         "local",
-        operations::expected_store_path(host, logs, progress),
+        operations::expected_store_path(host, processes, progress),
     )
     .await
 }

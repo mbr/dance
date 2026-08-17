@@ -5,7 +5,10 @@ use std::{num::NonZeroU32, time::Duration};
 use indicatif::ProgressBar;
 
 use crate::{
-    error::Error, inventory::Host, logs::RunLog, process::Invocation, store_path::StorePath,
+    error::Error,
+    inventory::Host,
+    process::{Invocation, ProcessContext},
+    store_path::StorePath,
 };
 
 /// Limits routine SSH operations.
@@ -14,11 +17,11 @@ pub(super) const SSH_TIMEOUT: Duration = Duration::from_mins(1);
 /// Reads the system currently activated on a target.
 pub(super) async fn deployed_store_path(
     host: &Host,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<StorePath, Error> {
     let output = Invocation::new(
-        logs,
+        processes,
         format!("review-{}-remote", host.id()),
         "ssh",
         progress,
@@ -35,41 +38,50 @@ pub(super) async fn deployed_store_path(
 /// Evaluates a host's desired system without building it.
 pub(super) async fn expected_store_path(
     host: &Host,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<StorePath, Error> {
-    let output = Invocation::new(logs, format!("review-{}-local", host.id()), "nix", progress)
-        .arguments(["eval", "--raw"])
-        .argument(host.nixos_output())
-        .output()
-        .await?;
+    let output = Invocation::new(
+        processes,
+        format!("review-{}-local", host.id()),
+        "nix",
+        progress,
+    )
+    .arguments(["eval", "--raw"])
+    .argument(host.nixos_output())
+    .output()
+    .await?;
     let value = output.trim();
     value.parse().map_err(Error::StorePath)
 }
 
 /// Builds and temporarily activates a host configuration.
-pub(super) async fn test(host: &Host, logs: &RunLog, progress: &ProgressBar) -> Result<(), Error> {
-    rebuild(host, "test", logs, progress).await
+pub(super) async fn test(
+    host: &Host,
+    processes: &ProcessContext<'_>,
+    progress: &ProgressBar,
+) -> Result<(), Error> {
+    rebuild(host, "test", processes, progress).await
 }
 
 /// Builds and persistently activates a host configuration.
 pub(super) async fn switch(
     host: &Host,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
-    rebuild(host, "switch", logs, progress).await
+    rebuild(host, "switch", processes, progress).await
 }
 
 /// Delegates a complete deployment action to `nixos-rebuild`.
 async fn rebuild(
     host: &Host,
     action: &str,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
     Invocation::new(
-        logs,
+        processes,
         format!("deploy-{}-{action}", host.id()),
         "nixos-rebuild",
         progress,
@@ -87,11 +99,11 @@ async fn rebuild(
 pub(super) async fn collect_garbage(
     host: &Host,
     keep_generations: NonZeroU32,
-    logs: &RunLog,
+    processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
     Invocation::new(
-        logs,
+        processes,
         format!("deploy-{}-prune-generations", host.id()),
         "ssh",
         progress,
@@ -108,7 +120,7 @@ pub(super) async fn collect_garbage(
     .await?;
 
     Invocation::new(
-        logs,
+        processes,
         format!("deploy-{}-refresh-bootloader", host.id()),
         "ssh",
         progress,
@@ -119,7 +131,7 @@ pub(super) async fn collect_garbage(
     .await?;
 
     Invocation::new(
-        logs,
+        processes,
         format!("deploy-{}-collect-garbage", host.id()),
         "ssh",
         progress,
