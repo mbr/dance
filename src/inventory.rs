@@ -1,7 +1,6 @@
 //! Inventory parsing and deployment metadata.
 
 use std::{
-    collections::HashSet,
     ffi::OsString,
     fs, io,
     path::{Path, PathBuf},
@@ -108,29 +107,29 @@ impl Inventory {
     }
 
     /// Limits the inventory to explicitly requested hosts.
-    pub(crate) fn select(mut self, requested: &[String]) -> Result<Self, InventoryError> {
+    pub(crate) fn select<S: AsRef<str>>(&self, requested: &[S]) -> Result<Self, InventoryError> {
         if requested.is_empty() {
-            return Ok(self);
+            return Ok(Self {
+                hosts: self.hosts.clone(),
+            });
         }
 
-        let mut selected = HashSet::new();
+        let mut hosts = IndexMap::new();
         for id in requested {
-            if !selected.insert(id.as_str()) {
-                return Err(InventoryError::DuplicateSelectedId(id.clone()));
-            }
-            if !self.hosts.contains_key(id) {
-                return Err(InventoryError::UnknownId(id.clone()));
+            let id = id.as_ref();
+            let Some(host) = self.hosts.get(id) else {
+                return Err(InventoryError::UnknownId(id.to_owned()));
+            };
+            if hosts.insert(id.to_owned(), host.clone()).is_some() {
+                return Err(InventoryError::DuplicateSelectedId(id.to_owned()));
             }
         }
-
-        self.hosts
-            .retain(|id, _host| selected.contains(id.as_str()));
-        Ok(self)
+        Ok(Self { hosts })
     }
 }
 
 /// Defines deployment metadata and connection details for a machine.
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Host {
     /// Identifies the inventory entry.
@@ -281,7 +280,7 @@ flake_name = "www"
             .select(&requested)
             .expect("known hosts should be selected");
         let ids = selected.into_iter().map(|host| host.id).collect::<Vec<_>>();
-        assert_eq!(ids, ["www", "party"]);
+        assert_eq!(ids, ["party", "www"]);
 
         let mut shared = inventory(&["www", "party", "other"]);
         shared
@@ -296,13 +295,13 @@ flake_name = "www"
             [(PathBuf::from("www"), 2), (PathBuf::from("other"), 1)]
         );
 
-        let unknown = inventory(&["www"]).select(&["party".to_owned()]);
+        let unknown = inventory(&["www"]).select(&["party"]);
         assert!(matches!(
             unknown,
             Err(InventoryError::UnknownId(id)) if id == "party"
         ));
 
-        let duplicate = inventory(&["www"]).select(&["www".to_owned(), "www".to_owned()]);
+        let duplicate = inventory(&["www"]).select(&["www", "www"]);
         assert!(matches!(
             duplicate,
             Err(InventoryError::DuplicateSelectedId(id)) if id == "www"
