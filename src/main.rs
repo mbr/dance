@@ -25,14 +25,16 @@ use crate::{
 
 /// Runs the selected workflow.
 async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
-    let inventory = Inventory::load(&cli.inventory).map_err(Error::InventoryLoad)?;
+    let inventory = Inventory::load(&cli.inventory).map_err(Error::Inventory)?;
     match cli.command {
         Command::Review(args) => {
-            let inventory = inventory.select(&args.ids)?;
+            let inventory = inventory.select(&args.ids).map_err(Error::Inventory)?;
             deployment::review(inventory, args.update, logs).await
         }
         Command::Deploy(args) => {
-            let inventory = inventory.select(&args.workflow.ids)?;
+            let inventory = inventory
+                .select(&args.workflow.ids)
+                .map_err(Error::Inventory)?;
             let options = deployment::DeployOptions {
                 update_flakes: args.workflow.update,
                 approved: args.yes,
@@ -45,7 +47,7 @@ async fn run(cli: Cli, logs: &RunLog) -> Result<(), Error> {
             deployment::deploy(inventory, options, logs).await
         }
         Command::Verify(args) => {
-            let inventory = inventory.select(&args.ids)?;
+            let inventory = inventory.select(&args.ids).map_err(Error::Inventory)?;
             verification::verify(inventory, logs).await
         }
     }

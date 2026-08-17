@@ -11,22 +11,40 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::error::Error;
+/// Describes a failure encountered while using an inventory.
+#[derive(Debug, Error)]
+pub(crate) enum InventoryError {
+    /// Indicates that the inventory could not be loaded.
+    #[error(transparent)]
+    Load(LoadError),
+    /// Indicates that a requested ID is not in the inventory.
+    #[error("ID `{0}` is not in the inventory")]
+    UnknownId(
+        /// Identifies the requested inventory entry.
+        String,
+    ),
+    /// Indicates that an ID was requested more than once.
+    #[error("ID `{0}` was selected more than once")]
+    DuplicateSelectedId(
+        /// Identifies the repeatedly selected inventory entry.
+        String,
+    ),
+}
 
 /// Describes a failure encountered while loading an inventory.
 #[derive(Debug, Error)]
 #[error("failed to load inventory `{}`", path.display())]
-pub(crate) struct InventoryLoadError {
+pub(crate) struct LoadError {
     /// Identifies the inventory.
     path: PathBuf,
     /// Describes the failed loading operation.
     #[source]
-    variant: InventoryLoadErrorVariant,
+    variant: LoadErrorVariant,
 }
 
 /// Describes the operation that prevented an inventory from loading.
 #[derive(Debug, Error)]
-enum InventoryLoadErrorVariant {
+enum LoadErrorVariant {
     /// Indicates that the inventory could not be read.
     #[error("failed to read inventory")]
     Read(#[source] io::Error),
@@ -54,16 +72,19 @@ impl IntoIterator for Inventory {
 
 impl Inventory {
     /// Loads an inventory and resolves its flake paths.
-    pub(crate) fn load(path: &Path) -> Result<Self, InventoryLoadError> {
-        let contents = fs::read_to_string(path).map_err(|source| InventoryLoadError {
-            path: path.to_path_buf(),
-            variant: InventoryLoadErrorVariant::Read(source),
-        })?;
-        let mut inventory: Self =
-            toml::from_str(&contents).map_err(|source| InventoryLoadError {
+    pub(crate) fn load(path: &Path) -> Result<Self, InventoryError> {
+        let contents = fs::read_to_string(path).map_err(|source| {
+            InventoryError::Load(LoadError {
                 path: path.to_path_buf(),
-                variant: InventoryLoadErrorVariant::Parse(source),
-            })?;
+                variant: LoadErrorVariant::Read(source),
+            })
+        })?;
+        let mut inventory: Self = toml::from_str(&contents).map_err(|source| {
+            InventoryError::Load(LoadError {
+                path: path.to_path_buf(),
+                variant: LoadErrorVariant::Parse(source),
+            })
+        })?;
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
 
         for (id, host) in &mut inventory.hosts {
@@ -87,7 +108,7 @@ impl Inventory {
     }
 
     /// Limits the inventory to explicitly requested hosts.
-    pub(crate) fn select(mut self, requested: &[String]) -> Result<Self, Error> {
+    pub(crate) fn select(mut self, requested: &[String]) -> Result<Self, InventoryError> {
         if requested.is_empty() {
             return Ok(self);
         }
@@ -95,10 +116,10 @@ impl Inventory {
         let mut selected = HashSet::new();
         for id in requested {
             if !selected.insert(id.as_str()) {
-                return Err(Error::DuplicateSelectedId { id: id.clone() });
+                return Err(InventoryError::DuplicateSelectedId(id.clone()));
             }
             if !self.hosts.contains_key(id) {
-                return Err(Error::UnknownId { id: id.clone() });
+                return Err(InventoryError::UnknownId(id.clone()));
             }
         }
 
@@ -187,8 +208,7 @@ mod tests {
 
     use indexmap::IndexMap;
 
-    use super::{Host, Inventory, InventoryLoadError, InventoryLoadErrorVariant};
-    use crate::error::Error;
+    use super::{Host, Inventory, InventoryError, LoadError, LoadErrorVariant};
 
     /// Creates a minimal inventory with hosts in the given order.
     fn inventory(ids: &[&str]) -> Inventory {
@@ -217,20 +237,20 @@ mod tests {
         let missing = directory.path().join("missing.toml");
         assert!(matches!(
             Inventory::load(&missing),
-            Err(InventoryLoadError {
+            Err(InventoryError::Load(LoadError {
                 path,
-                variant: InventoryLoadErrorVariant::Read(_),
-            }) if path == missing
+                variant: LoadErrorVariant::Read(_),
+            })) if path == missing
         ));
 
         let malformed = directory.path().join("malformed.toml");
         std::fs::write(&malformed, "not TOML =").expect("malformed inventory should be written");
         assert!(matches!(
             Inventory::load(&malformed),
-            Err(InventoryLoadError {
+            Err(InventoryError::Load(LoadError {
                 path,
-                variant: InventoryLoadErrorVariant::Parse(_),
-            }) if path == malformed
+                variant: LoadErrorVariant::Parse(_),
+            })) if path == malformed
         ));
     }
 
@@ -279,13 +299,13 @@ flake_name = "www"
         let unknown = inventory(&["www"]).select(&["party".to_owned()]);
         assert!(matches!(
             unknown,
-            Err(Error::UnknownId { id }) if id == "party"
+            Err(InventoryError::UnknownId(id)) if id == "party"
         ));
 
         let duplicate = inventory(&["www"]).select(&["www".to_owned(), "www".to_owned()]);
         assert!(matches!(
             duplicate,
-            Err(Error::DuplicateSelectedId { id }) if id == "www"
+            Err(InventoryError::DuplicateSelectedId(id)) if id == "www"
         ));
     }
 }

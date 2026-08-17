@@ -4,7 +4,7 @@ use std::{io, path::PathBuf, process::ExitStatus};
 
 use thiserror::Error;
 
-use crate::{inventory::InventoryLoadError, store_path::StorePathError};
+use crate::{inventory::InventoryError, store_path::StorePathError};
 
 /// Describes failures encountered while deploying hosts.
 #[derive(Debug, Error)]
@@ -93,21 +93,9 @@ pub(crate) enum Error {
         #[source]
         source: io::Error,
     },
-    /// Indicates that an inventory could not be loaded.
+    /// Indicates that an inventory operation failed.
     #[error(transparent)]
-    InventoryLoad(InventoryLoadError),
-    /// Indicates that a requested ID is not in the inventory.
-    #[error("ID `{id}` is not in the inventory")]
-    UnknownId {
-        /// Identifies the requested inventory entry.
-        id: String,
-    },
-    /// Indicates that an ID was requested more than once.
-    #[error("ID `{id}` was selected more than once")]
-    DuplicateSelectedId {
-        /// Identifies the repeatedly selected inventory entry.
-        id: String,
-    },
+    Inventory(InventoryError),
     /// Indicates that flake metadata was malformed.
     #[error("failed to parse metadata for flake `{}`", path.display())]
     ParseFlakeMetadata {
