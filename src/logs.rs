@@ -5,6 +5,7 @@ mod manifest;
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
+    env,
     ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::Write,
@@ -105,7 +106,7 @@ impl RunLog {
 
         let base = match base {
             Some(base) => base.to_path_buf(),
-            None => dirs::state_dir()
+            None => state_directory(env::var_os("XDG_STATE_HOME"), dirs::home_dir())
                 .ok_or(Error::StateDirectoryUnavailable)?
                 .join("dance/logs"),
         };
@@ -318,6 +319,14 @@ impl Drop for RunLog {
     }
 }
 
+/// Finds the XDG state directory from environment and home paths.
+fn state_directory(xdg_state_home: Option<OsString>, home: Option<PathBuf>) -> Option<PathBuf> {
+    xdg_state_home
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .or_else(|| home.map(|path| path.join(".local/state")))
+}
+
 /// Returns a saturated millisecond duration for manifest serialization.
 fn elapsed_milliseconds(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
@@ -385,7 +394,30 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{LogMode, RunLog};
+    use super::{LogMode, RunLog, state_directory};
+
+    /// Checks XDG state overrides and the home-directory fallback.
+    #[test]
+    fn state_directory_is_available_on_all_platforms() {
+        let home = tempdir().expect("temporary home directory should be created");
+        let state = tempdir().expect("temporary state directory should be created");
+
+        assert_eq!(
+            state_directory(
+                Some(state.path().as_os_str().to_owned()),
+                Some(home.path().to_path_buf()),
+            ),
+            Some(state.path().to_path_buf())
+        );
+        assert_eq!(
+            state_directory(None, Some(home.path().to_path_buf())),
+            Some(home.path().join(".local/state"))
+        );
+        assert_eq!(
+            state_directory(Some("relative".into()), Some(home.path().to_path_buf())),
+            Some(home.path().join(".local/state"))
+        );
+    }
 
     /// Checks that retained runs contain command metadata and exact output.
     #[test]
