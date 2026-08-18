@@ -471,13 +471,9 @@ mod tests {
             .finish(Some("invalid output"))
             .expect("run log should finish")
             .expect("always logs should be retained");
-        let manifest =
-            fs::read_to_string(directory.join("run.toml")).expect("manifest should be readable");
-        let command = manifest
-            .split_once("[[commands]]")
-            .expect("manifest should contain a command")
-            .1;
-        assert!(command.contains("status = \"failed\""));
-        assert!(command.contains("returned non-UTF-8 output"));
+        let run = fs::read_to_string(directory.join("run.log"))
+            .expect("lifecycle log should be readable");
+        assert!(run.contains("command 002 failed duration_ms="));
+        assert!(run.contains("returned non-UTF-8 output"));
     }
 }

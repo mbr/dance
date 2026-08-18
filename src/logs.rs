@@ -1,7 +1,5 @@
 //! Persistent subprocess diagnostics.
 
-mod manifest;
-
 #[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::{
@@ -18,7 +16,6 @@ use std::{
 use clap::ValueEnum;
 use uuid::Uuid;
 
-use self::manifest::Manifest;
 use crate::error::Error;
 
 /// Selects when completed run logs are retained.
@@ -52,11 +49,21 @@ impl OutputLog {
     }
 }
 
+/// Serializes lifecycle events for one Dance invocation.
+struct RunFile {
+    /// Locates the lifecycle log for error reporting.
+    path: PathBuf,
+    /// Receives lifecycle events.
+    file: File,
+    /// Assigns command identifiers in start order.
+    next_command_id: usize,
+}
+
 /// Guards diagnostic artifacts for one captured subprocess.
 pub(crate) struct CommandLog<'a> {
-    /// Owns the corresponding run manifest.
+    /// Owns the corresponding run log.
     run: &'a RunLog,
-    /// Identifies the corresponding manifest record.
+    /// Identifies the command in lifecycle events.
     id: Option<usize>,
     /// Measures command duration monotonically.
     started: Instant,
@@ -76,8 +83,8 @@ pub(crate) struct RunLog {
     directory: Option<PathBuf>,
     /// Measures run duration monotonically.
     started: Instant,
-    /// Protects records shared by concurrent commands.
-    manifest: Mutex<Manifest>,
+    /// Serializes lifecycle events from concurrent commands.
+    log: Option<Mutex<RunFile>>,
     /// Records whether the run was explicitly finalized.
     finished: bool,
 }
@@ -90,16 +97,12 @@ impl RunLog {
         inventory: &Path,
     ) -> Result<Self, Error> {
         let started = Instant::now();
-        let manifest = Manifest::new(
-            inventory.to_path_buf(),
-            std::env::args_os().map(display_os).collect(),
-        );
         if matches!(mode, LogMode::Never) {
             return Ok(Self {
                 mode,
                 directory: None,
                 started,
-                manifest: Mutex::new(manifest),
+                log: None,
                 finished: false,
             });
         }
@@ -115,18 +118,27 @@ impl RunLog {
             source,
         })?;
         let directory = create_run_directory(&base)?;
+        let path = directory.join("run.log");
+        let file = open_secure(&path)?;
         let log = Self {
             mode,
             directory: Some(directory),
             started,
-            manifest: Mutex::new(manifest),
+            log: Some(Mutex::new(RunFile {
+                path,
+                file,
+                next_command_id: 1,
+            })),
             finished: false,
         };
-        log.write_manifest()?;
+        log.write_event(&format!(
+            "run started format=1 inventory={inventory:?} arguments={}",
+            format_arguments(std::env::args_os())
+        ))?;
         Ok(log)
     }
 
-    /// Starts a record for a subprocess.
+    /// Records and starts a subprocess.
     pub(crate) fn command<'a>(
         &'a self,
         label: &str,
@@ -144,11 +156,14 @@ impl RunLog {
                 finished: false,
             });
         };
-        let mut manifest = self
-            .manifest
+        let mut log = self
+            .log
+            .as_ref()
+            .expect("enabled logs should have a lifecycle file")
             .lock()
-            .expect("run log manifest lock should not be poisoned");
-        let id = manifest.next_command_id();
+            .expect("run log lock should not be poisoned");
+        let id = log.next_command_id;
+        log.next_command_id += 1;
         let stem = format!("{id:03}-{}", sanitize(label));
         let stdout_name = format!("{stem}.stdout");
         let stderr_name = format!("{stem}.stderr");
@@ -156,19 +171,17 @@ impl RunLog {
         let stderr = directory.join(&stderr_name);
         let stdout_log = open_secure(&stdout)?;
         let stderr_log = open_secure(&stderr)?;
+        let command_arguments =
+            std::iter::once(program.as_ref().to_owned()).chain(arguments.iter().cloned());
+        write_event(
+            &mut log,
+            &format!(
+                "command {id:03} started label={label:?} arguments={} stdout={stdout_name:?} stderr={stderr_name:?}",
+                format_arguments(command_arguments)
+            ),
+        )?;
+        drop(log);
 
-        let mut command_arguments = Vec::with_capacity(arguments.len() + 1);
-        command_arguments.push(display_os(program));
-        command_arguments.extend(arguments.iter().map(display_os));
-        manifest.start_command(
-            id,
-            label.to_owned(),
-            command_arguments,
-            stdout_name,
-            stderr_name,
-        );
-        self.write_locked_manifest(&manifest)?;
-        drop(manifest);
         Ok(CommandLog {
             run: self,
             id: Some(id),
@@ -191,17 +204,16 @@ impl RunLog {
             self.finished = true;
             return Ok(None);
         };
-        {
-            let mut manifest = self
-                .manifest
-                .lock()
-                .expect("run log manifest lock should not be poisoned");
-            manifest.finish(error, elapsed_milliseconds(self.started));
-            self.write_locked_manifest(&manifest)?;
-            drop(manifest);
-        }
+        let succeeded = error.is_none();
+        let status = if succeeded { "succeeded" } else { "failed" };
+        let error = error.map_or_else(String::new, |error| format!(" error={error:?}"));
+        self.write_event(&format!(
+            "run {status} duration_ms={}{}",
+            elapsed_milliseconds(self.started),
+            error
+        ))?;
 
-        let retained = if error.is_none() && matches!(self.mode, LogMode::OnError) {
+        let retained = if succeeded && matches!(self.mode, LogMode::OnError) {
             fs::remove_dir_all(&directory).map_err(|source| Error::RemoveLogDirectory {
                 path: directory,
                 source,
@@ -214,49 +226,20 @@ impl RunLog {
         Ok(retained)
     }
 
-    /// Updates run state and persists the manifest.
-    fn update_manifest(&self, update: impl FnOnce(&mut Manifest)) -> Result<(), Error> {
-        let mut manifest = self
-            .manifest
-            .lock()
-            .expect("run log manifest lock should not be poisoned");
-        update(&mut manifest);
-        self.write_locked_manifest(&manifest)
+    /// Appends one lifecycle event.
+    fn write_event(&self, event: &str) -> Result<(), Error> {
+        let Some(log) = &self.log else {
+            return Ok(());
+        };
+        let mut log = log.lock().expect("run log lock should not be poisoned");
+        write_event(&mut log, event)
     }
 
     /// Marks an unfinished command as interrupted.
     fn interrupt_command(&self, id: usize, duration_ms: u64) {
-        let Ok(mut manifest) = self.manifest.lock() else {
-            return;
-        };
-        manifest.interrupt_command(id, duration_ms);
-        let _result = self.write_locked_manifest(&manifest);
-    }
-
-    /// Writes the current manifest atomically.
-    fn write_manifest(&self) -> Result<(), Error> {
-        let manifest = self
-            .manifest
-            .lock()
-            .expect("run log manifest lock should not be poisoned");
-        self.write_locked_manifest(&manifest)
-    }
-
-    /// Writes a locked manifest atomically.
-    fn write_locked_manifest(&self, manifest: &Manifest) -> Result<(), Error> {
-        let Some(directory) = &self.directory else {
-            return Ok(());
-        };
-        let contents = toml::to_string_pretty(manifest)
-            .map_err(|source| Error::SerializeLogManifest { source })?;
-        let path = directory.join("run.toml");
-        let temporary = directory.join("run.toml.tmp");
-        write_secure(&temporary, contents.as_bytes())?;
-        fs::rename(&temporary, &path).map_err(|source| Error::WriteLog {
-            path: path.clone(),
-            source,
-        })?;
-        Ok(())
+        let _result = self.write_event(&format!(
+            "command {id:03} interrupted duration_ms={duration_ms}"
+        ));
     }
 }
 
@@ -272,9 +255,18 @@ impl CommandLog<'_> {
             self.finished = true;
             return Ok(());
         };
-        let result = self.run.update_manifest(|manifest| {
-            manifest.complete_command(id, status, elapsed_milliseconds(self.started));
-        });
+        let state = if status.success() {
+            "succeeded"
+        } else {
+            "failed"
+        };
+        let exit_code = status
+            .code()
+            .map_or_else(|| "none".to_owned(), |code| code.to_string());
+        let result = self.run.write_event(&format!(
+            "command {id:03} {state} exit_code={exit_code} duration_ms={}",
+            elapsed_milliseconds(self.started)
+        ));
         self.finished = result.is_ok();
         result
     }
@@ -285,9 +277,10 @@ impl CommandLog<'_> {
             self.finished = true;
             return Ok(());
         };
-        let result = self.run.update_manifest(|manifest| {
-            manifest.fail_command(id, error.to_owned(), elapsed_milliseconds(self.started));
-        });
+        let result = self.run.write_event(&format!(
+            "command {id:03} failed duration_ms={} error={error:?}",
+            elapsed_milliseconds(self.started)
+        ));
         self.finished = result.is_ok();
         result
     }
@@ -311,11 +304,10 @@ impl Drop for RunLog {
         if self.finished || self.directory.is_none() {
             return;
         }
-        let Ok(mut manifest) = self.manifest.lock() else {
-            return;
-        };
-        manifest.interrupt(elapsed_milliseconds(self.started));
-        let _result = self.write_locked_manifest(&manifest);
+        let _result = self.write_event(&format!(
+            "run interrupted duration_ms={}",
+            elapsed_milliseconds(self.started)
+        ));
     }
 }
 
@@ -327,7 +319,7 @@ fn state_directory(xdg_state_home: Option<OsString>, home: Option<PathBuf>) -> O
         .or_else(|| home.map(|path| path.join(".local/state")))
 }
 
-/// Returns a saturated millisecond duration for manifest serialization.
+/// Returns a saturated millisecond duration for lifecycle events.
 fn elapsed_milliseconds(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -347,9 +339,21 @@ fn create_run_directory(base: &Path) -> Result<PathBuf, Error> {
     Ok(path)
 }
 
-/// Converts an operating-system string for diagnostics.
-fn display_os(value: impl AsRef<OsStr>) -> String {
-    value.as_ref().to_string_lossy().into_owned()
+/// Formats operating-system arguments as an unambiguous diagnostic list.
+fn format_arguments(arguments: impl IntoIterator<Item = impl AsRef<OsStr>>) -> String {
+    let arguments = arguments
+        .into_iter()
+        .map(|argument| format!("{:?}", argument.as_ref()))
+        .collect::<Vec<_>>();
+    format!("[{}]", arguments.join(", "))
+}
+
+/// Appends one complete lifecycle event to a locked run file.
+fn write_event(log: &mut RunFile, event: &str) -> Result<(), Error> {
+    writeln!(log.file, "{event}").map_err(|source| Error::WriteLog {
+        path: log.path.clone(),
+        source,
+    })
 }
 
 /// Converts a command label into a portable filename component.
@@ -374,15 +378,6 @@ fn open_secure(path: &Path) -> Result<File, Error> {
     #[cfg(unix)]
     options.mode(0o600);
     options.open(path).map_err(|source| Error::WriteLog {
-        path: path.to_path_buf(),
-        source,
-    })
-}
-
-/// Writes a file with private permissions.
-fn write_secure(path: &Path, contents: &[u8]) -> Result<(), Error> {
-    let mut file = open_secure(path)?;
-    file.write_all(contents).map_err(|source| Error::WriteLog {
         path: path.to_path_buf(),
         source,
     })
@@ -464,12 +459,14 @@ mod tests {
                 .expect("standard error log should be readable"),
             b"standard error\n"
         );
-        let manifest =
-            fs::read_to_string(directory.join("run.toml")).expect("manifest should be readable");
-        assert!(manifest.contains("version = 2"));
-        assert!(manifest.contains("status = \"succeeded\""));
-        assert_eq!(manifest.matches("duration_ms = ").count(), 2);
-        assert!(manifest.contains("arguments = [\n    \"ssh\",\n    \"party\",\n]"));
+        let run = fs::read_to_string(directory.join("run.log"))
+            .expect("lifecycle log should be readable");
+        assert!(run.contains("run started format=1 inventory=\"inventory.toml\" arguments=["));
+        assert!(run.contains(
+            "command 001 started label=\"review party\" arguments=[\"ssh\", \"party\"] stdout=\"001-review-party.stdout\" stderr=\"001-review-party.stderr\""
+        ));
+        assert!(run.contains("command 001 succeeded exit_code=0 duration_ms="));
+        assert!(run.contains("run succeeded duration_ms="));
     }
 
     /// Checks fail-safe retention and successful cleanup for automatic logs.
@@ -487,10 +484,9 @@ mod tests {
             .clone()
             .expect("enabled logs should have a directory");
         drop(interrupted);
-        let manifest = fs::read_to_string(interrupted_path.join("run.toml"))
-            .expect("interrupted manifest should be readable");
-        assert!(manifest.contains("status = \"interrupted\""));
-        assert!(manifest.contains("duration_ms = "));
+        let run = fs::read_to_string(interrupted_path.join("run.log"))
+            .expect("interrupted lifecycle log should be readable");
+        assert!(run.contains("run interrupted duration_ms="));
 
         let successful = RunLog::start(
             LogMode::OnError,

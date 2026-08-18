@@ -84,13 +84,6 @@ pub(crate) enum Error {
         #[source]
         source: io::Error,
     },
-    /// Indicates that a log manifest could not be serialized.
-    #[error("failed to serialize log manifest")]
-    SerializeLogManifest {
-        /// Contains the serialization error.
-        #[source]
-        source: toml::ser::Error,
-    },
     /// Indicates that a completed log directory could not be removed.
     #[error("failed to remove log directory `{}`", path.display())]
     RemoveLogDirectory {
