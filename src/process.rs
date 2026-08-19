@@ -171,22 +171,6 @@ fn fail_command<T>(log: CommandLog<'_>, error: Error) -> Result<T, Error> {
     Err(error)
 }
 
-/// Creates the policy used after a command deadline expires.
-fn timeout_shutdown() -> GracefulShutdown {
-    GracefulShutdown::builder()
-        .unix_sigterm(TERMINATION_GRACE)
-        .windows_ctrl_break(TERMINATION_GRACE)
-        .build()
-}
-
-/// Creates the policy used after application interruption.
-fn interruption_shutdown() -> GracefulShutdown {
-    GracefulShutdown::builder()
-        .unix_sigint(TERMINATION_GRACE)
-        .windows_ctrl_break(TERMINATION_GRACE)
-        .build()
-}
-
 /// Configures and executes one logged subprocess.
 pub(crate) struct Invocation<'a> {
     /// Shares run-scoped process services.
@@ -324,7 +308,12 @@ impl<'a> Invocation<'a> {
         let wait_result = {
             let wait = process
                 .wait_for_completion(limit)
-                .or_terminate(timeout_shutdown())
+                .or_terminate(
+                    GracefulShutdown::builder()
+                        .unix_sigterm(TERMINATION_GRACE)
+                        .windows_ctrl_break(TERMINATION_GRACE)
+                        .build(),
+                )
                 .into_future();
             tokio::pin!(wait);
             loop {
@@ -352,7 +341,15 @@ impl<'a> Invocation<'a> {
                     }),
                 );
             }
-            None => match process.terminate(interruption_shutdown()).await {
+            None => match process
+                .terminate(
+                    GracefulShutdown::builder()
+                        .unix_sigint(TERMINATION_GRACE)
+                        .windows_ctrl_break(TERMINATION_GRACE)
+                        .build(),
+                )
+                .await
+            {
                 Ok(_status) => Completion::Interrupted,
                 Err(source) => {
                     process.must_not_be_terminated();

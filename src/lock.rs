@@ -9,7 +9,7 @@ use std::{
 use thiserror::Error;
 use tokio::{
     io::AsyncReadExt,
-    process::{Child, ChildStderr, ChildStdin, Command},
+    process::{Child, ChildStdin, Command},
     task::JoinHandle,
 };
 
@@ -163,11 +163,15 @@ impl DeploymentLease {
             .stdout
             .take()
             .expect("lease command standard output should be piped");
-        let stderr = child
+        let mut stderr = child
             .stderr
             .take()
             .expect("lease command standard error should be piped");
-        let stderr = tokio::spawn(read_stderr(stderr));
+        let stderr = tokio::spawn(async move {
+            let mut output = Vec::new();
+            stderr.read_to_end(&mut output).await?;
+            Ok::<_, io::Error>(output)
+        });
         let mut acknowledgement = vec![0; ACQUIRED.len()];
         let acquisition =
             tokio::time::timeout(ACQUISITION_TIMEOUT, stdout.read_exact(&mut acknowledgement))
@@ -282,13 +286,6 @@ impl DeploymentLease {
             })
         }
     }
-}
-
-/// Collects standard error from the lease process.
-async fn read_stderr(mut stderr: ChildStderr) -> Result<Vec<u8>, io::Error> {
-    let mut output = Vec::new();
-    stderr.read_to_end(&mut output).await?;
-    Ok(output)
 }
 
 /// Converts collected process diagnostics to a concise string.
