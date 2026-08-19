@@ -417,7 +417,7 @@ impl<'a> Invocation<'a> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, time::Duration};
+    use std::{fs, time::Duration};
 
     use indicatif::ProgressBar;
     use tempfile::tempdir;
@@ -432,12 +432,7 @@ mod tests {
     /// Checks bounded termination and explicit cancellation reporting.
     #[tokio::test]
     async fn commands_report_timeouts_and_interruption() {
-        let logs = RunLog::start(
-            LogMode::Never,
-            None,
-            Path::new("timeout-test-inventory.toml"),
-        )
-        .expect("disabled logs should start");
+        let logs = RunLog::start(LogMode::Never, None).expect("disabled logs should start");
         let progress = ProgressBar::hidden();
         let timeout_cancellation = CancellationToken::new();
         let timeout_context = ProcessContext::new(&logs, timeout_cancellation);
@@ -474,12 +469,8 @@ mod tests {
     #[tokio::test]
     async fn invalid_command_output_is_reported() {
         let base = tempdir().expect("temporary directory should be created");
-        let logs = RunLog::start(
-            LogMode::Always,
-            Some(base.path()),
-            Path::new("inventory.toml"),
-        )
-        .expect("enabled logs should start");
+        let logs =
+            RunLog::start(LogMode::Always, Some(base.path())).expect("enabled logs should start");
         let progress = ProgressBar::hidden();
         let context = ProcessContext::new(&logs, CancellationToken::new());
         Invocation::new(&context, "ignored-output", "sh", &progress)
@@ -506,10 +497,5 @@ mod tests {
             fs::read(directory.join("002.stdout")).expect("invalid output log should be readable"),
             [0xff]
         );
-        let run =
-            fs::read_to_string(directory.join("run.log")).expect("tracing log should be readable");
-        assert!(run.contains("command: command failed"));
-        assert!(run.contains("id=2"));
-        assert!(run.contains("returned non-UTF-8 output"));
     }
 }

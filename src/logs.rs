@@ -15,9 +15,8 @@ use std::{
 
 use clap::ValueEnum;
 use thiserror::Error;
-use tracing::{Dispatch, Span};
-use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
-use tracing_subscriber::{EnvFilter, filter::LevelFilter};
+use tracing::Span;
+use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
 use uuid::Uuid;
 
 use crate::error::PathedError;
@@ -102,8 +101,8 @@ pub(crate) struct RunLog {
     started: Instant,
     /// Allocates command identifiers in start order.
     next_command_id: AtomicUsize,
-    /// Provides the tracing subscriber installed by the application.
-    dispatch: Option<Dispatch>,
+    /// Provides the tracing writer before global initialization.
+    writer: Option<NonBlocking>,
     /// Flushes and closes the tracing writer.
     worker: Option<WorkerGuard>,
     /// Records whether the run was explicitly finalized.
@@ -112,11 +111,7 @@ pub(crate) struct RunLog {
 
 impl RunLog {
     /// Starts a run log using an optional base directory override.
-    pub(crate) fn start(
-        mode: LogMode,
-        base: Option<&Path>,
-        inventory: &Path,
-    ) -> Result<Self, LogError> {
+    pub(crate) fn start(mode: LogMode, base: Option<&Path>) -> Result<Self, LogError> {
         let started = Instant::now();
         if matches!(mode, LogMode::Never) {
             return Ok(Self {
@@ -124,7 +119,7 @@ impl RunLog {
                 directory: None,
                 started,
                 next_command_id: AtomicUsize::new(1),
-                dispatch: None,
+                writer: None,
                 worker: None,
                 finished: false,
             });
@@ -142,39 +137,29 @@ impl RunLog {
         let path = directory.join("run.log");
         let file = open_log(&path)?;
         let (writer, worker) = NonBlockingBuilder::default().lossy(false).finish(file);
-        let filter = EnvFilter::builder()
-            .with_default_directive(LevelFilter::INFO.into())
-            .from_env_lossy();
-        let subscriber = tracing_subscriber::fmt()
-            .compact()
-            .with_ansi(false)
-            .with_env_filter(filter)
-            .with_target(false)
-            .with_writer(writer)
-            .finish();
-        let log = Self {
+        Ok(Self {
             mode,
             directory: Some(directory),
             started,
             next_command_id: AtomicUsize::new(1),
-            dispatch: Some(Dispatch::new(subscriber)),
+            writer: Some(writer),
             worker: Some(worker),
             finished: false,
-        };
-        let arguments = std::env::args_os().collect::<Vec<_>>();
-        log.with_dispatch(|| {
-            tracing::info!(format = 2, inventory = ?inventory, ?arguments, "run started");
-        });
-        Ok(log)
+        })
     }
 
-    /// Installs the run's tracing subscriber as the process default.
-    pub(crate) fn install(&self) -> Result<(), LogError> {
-        let Some(dispatch) = &self.dispatch else {
-            return Ok(());
-        };
-        tracing::dispatcher::set_global_default(dispatch.clone())
-            .map_err(|source| LogError::InstallTracing { source })
+    /// Takes the tracing writer for global subscriber initialization.
+    pub(crate) fn take_writer(&mut self) -> Option<NonBlocking> {
+        self.writer.take()
+    }
+
+    /// Records the invocation after tracing has been initialized.
+    pub(crate) fn record_start(&self, inventory: &Path) {
+        if self.directory.is_none() {
+            return;
+        }
+        let arguments = std::env::args_os().collect::<Vec<_>>();
+        tracing::info!(format = 2, inventory = ?inventory, ?arguments, "run started");
     }
 
     /// Records and starts a subprocess.
@@ -203,19 +188,16 @@ impl RunLog {
         let stderr = directory.join(&stderr_name);
         let stdout_log = open_log(&stdout)?;
         let stderr_log = open_log(&stderr)?;
-        let span = self.with_dispatch(|| {
-            let span = tracing::info_span!("command", id);
-            tracing::info!(
-                parent: &span,
-                label,
-                program = ?program.as_ref(),
-                ?arguments,
-                stdout = stdout_name,
-                stderr = stderr_name,
-                "command started"
-            );
-            span
-        });
+        let span = tracing::info_span!("command", id);
+        tracing::info!(
+            parent: &span,
+            label,
+            program = ?program.as_ref(),
+            ?arguments,
+            stdout = stdout_name,
+            stderr = stderr_name,
+            "command started"
+        );
 
         Ok(CommandLog {
             run: self,
@@ -241,10 +223,10 @@ impl RunLog {
             return Ok(None);
         };
         let duration_ms = elapsed_milliseconds(self.started);
-        self.with_dispatch(|| match error {
+        match error {
             Some(error) => tracing::warn!(duration_ms, error, "run failed"),
             None => tracing::info!(duration_ms, "run succeeded"),
-        });
+        }
         self.close_writer();
 
         let retained = if error.is_none() && matches!(self.mode, LogMode::OnError) {
@@ -258,14 +240,6 @@ impl RunLog {
         Ok(retained)
     }
 
-    /// Executes an operation with the run's tracing subscriber.
-    fn with_dispatch<T>(&self, operation: impl FnOnce() -> T) -> T {
-        match &self.dispatch {
-            Some(dispatch) => tracing::dispatcher::with_default(dispatch, operation),
-            None => operation(),
-        }
-    }
-
     /// Flushes pending tracing events and closes the log file.
     fn close_writer(&mut self) {
         drop(self.worker.take());
@@ -273,9 +247,7 @@ impl RunLog {
 
     /// Marks an unfinished command as interrupted.
     fn interrupt_command(&self, span: &Span, duration_ms: u64) {
-        self.with_dispatch(|| {
-            tracing::warn!(parent: span, duration_ms, "command interrupted");
-        });
+        tracing::warn!(parent: span, duration_ms, "command interrupted");
     }
 }
 
@@ -293,13 +265,11 @@ impl CommandLog<'_> {
         }
         let duration_ms = elapsed_milliseconds(self.started);
         let exit_code = status.code();
-        self.run.with_dispatch(|| {
-            if status.success() {
-                tracing::info!(parent: &self.span, ?exit_code, duration_ms, "command succeeded");
-            } else {
-                tracing::warn!(parent: &self.span, ?exit_code, duration_ms, "command failed");
-            }
-        });
+        if status.success() {
+            tracing::info!(parent: &self.span, ?exit_code, duration_ms, "command succeeded");
+        } else {
+            tracing::warn!(parent: &self.span, ?exit_code, duration_ms, "command failed");
+        }
         self.finished = true;
     }
 
@@ -310,9 +280,7 @@ impl CommandLog<'_> {
             return;
         }
         let duration_ms = elapsed_milliseconds(self.started);
-        self.run.with_dispatch(|| {
-            tracing::warn!(parent: &self.span, duration_ms, error, "command failed");
-        });
+        tracing::warn!(parent: &self.span, duration_ms, error, "command failed");
         self.finished = true;
     }
 }
@@ -334,9 +302,7 @@ impl Drop for RunLog {
             return;
         }
         let duration_ms = elapsed_milliseconds(self.started);
-        self.with_dispatch(|| {
-            tracing::warn!(duration_ms, "run interrupted");
-        });
+        tracing::warn!(duration_ms, "run interrupted");
         self.close_writer();
     }
 }
@@ -380,6 +346,19 @@ mod tests {
 
     use super::{LogMode, RunLog, state_directory};
 
+    /// Creates an isolated subscriber for a synchronous log test.
+    fn test_subscriber(logs: &mut RunLog) -> impl tracing::Subscriber {
+        let writer = logs
+            .take_writer()
+            .expect("enabled logs should provide a tracing writer");
+        tracing_subscriber::fmt()
+            .compact()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(writer)
+            .finish()
+    }
+
     /// Checks XDG state overrides and the home-directory fallback.
     #[test]
     fn state_directory_is_available_on_all_platforms() {
@@ -407,34 +386,33 @@ mod tests {
     #[test]
     fn retained_run_contains_command_artifacts() {
         let base = tempdir().expect("temporary directory should be created");
-        let logs = RunLog::start(
-            LogMode::Always,
-            Some(base.path()),
-            Path::new("inventory.toml"),
-        )
-        .expect("run log should start");
-        let mut command = logs
-            .command("review party", "ssh", &["party".into()])
-            .expect("command log should start");
-        let (mut stdout, mut stderr) = command.take_outputs();
-        stdout
-            .as_mut()
-            .expect("standard output log should exist")
-            .write(b"standard output\n")
-            .expect("standard output should be logged");
-        stderr
-            .as_mut()
-            .expect("standard error log should exist")
-            .write(b"standard error\n")
-            .expect("standard error should be logged");
-        let status = Command::new("true")
-            .status()
-            .expect("successful status should be produced");
-        command.complete(status);
-        let directory = logs
-            .finish(None)
-            .expect("run log should finish")
-            .expect("always logs should be retained");
+        let mut logs =
+            RunLog::start(LogMode::Always, Some(base.path())).expect("run log should start");
+        let subscriber = test_subscriber(&mut logs);
+        let directory = tracing::subscriber::with_default(subscriber, || {
+            logs.record_start(Path::new("inventory.toml"));
+            let mut command = logs
+                .command("review party", "ssh", &["party".into()])
+                .expect("command log should start");
+            let (mut stdout, mut stderr) = command.take_outputs();
+            stdout
+                .as_mut()
+                .expect("standard output log should exist")
+                .write(b"standard output\n")
+                .expect("standard output should be logged");
+            stderr
+                .as_mut()
+                .expect("standard error log should exist")
+                .write(b"standard error\n")
+                .expect("standard error should be logged");
+            let status = Command::new("true")
+                .status()
+                .expect("successful status should be produced");
+            command.complete(status);
+            logs.finish(None)
+                .expect("run log should finish")
+                .expect("always logs should be retained")
+        });
 
         assert_eq!(
             fs::read(directory.join("001.stdout")).expect("standard output log should be readable"),
@@ -459,37 +437,37 @@ mod tests {
     #[test]
     fn automatic_logs_preserve_interruptions_and_remove_successes() {
         let base = tempdir().expect("temporary directory should be created");
-        let interrupted = RunLog::start(
-            LogMode::OnError,
-            Some(base.path()),
-            Path::new("inventory.toml"),
-        )
-        .expect("run log should start");
+        let mut interrupted =
+            RunLog::start(LogMode::OnError, Some(base.path())).expect("run log should start");
         let interrupted_path = interrupted
             .directory
             .clone()
             .expect("enabled logs should have a directory");
-        drop(interrupted);
+        let subscriber = test_subscriber(&mut interrupted);
+        tracing::subscriber::with_default(subscriber, || {
+            interrupted.record_start(Path::new("inventory.toml"));
+            drop(interrupted);
+        });
         let trace = fs::read_to_string(interrupted_path.join("run.log"))
             .expect("interrupted trace log should be readable");
         assert!(trace.contains("run interrupted"));
 
-        let successful = RunLog::start(
-            LogMode::OnError,
-            Some(base.path()),
-            Path::new("inventory.toml"),
-        )
-        .expect("run log should start");
+        let mut successful =
+            RunLog::start(LogMode::OnError, Some(base.path())).expect("run log should start");
         let successful_path = successful
             .directory
             .clone()
             .expect("enabled logs should have a directory");
-        assert_eq!(
-            successful
-                .finish(None)
-                .expect("successful run should finish"),
-            None
-        );
+        let subscriber = test_subscriber(&mut successful);
+        tracing::subscriber::with_default(subscriber, || {
+            successful.record_start(Path::new("inventory.toml"));
+            assert_eq!(
+                successful
+                    .finish(None)
+                    .expect("successful run should finish"),
+                None
+            );
+        });
         assert!(!successful_path.exists());
     }
 }

@@ -292,8 +292,7 @@ mod tests {
         );
         run(repository.path(), &["commit", "--quiet", "-m", "Initial"]);
 
-        let logs = RunLog::start(LogMode::Never, None, Path::new("inventory.toml"))
-            .expect("disabled logs should start");
+        let logs = RunLog::start(LogMode::Never, None).expect("disabled logs should start");
         let processes = ProcessContext::new(&logs, CancellationToken::new());
         let progress = ProgressBar::hidden();
         let prepared = FlakeRepository::prepare(repository.path(), &processes, &progress)

@@ -18,6 +18,7 @@ use std::{path::PathBuf, process::ExitCode};
 use clap::Parser;
 use display_full_error::DisplayFullErrorExt;
 use tokio_util::sync::CancellationToken;
+use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 
 use crate::{
     cli::{Cli, Command},
@@ -86,17 +87,30 @@ fn report(result: Result<(), Error>, logs: Result<Option<PathBuf>, Error>) -> Ex
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let logs = match RunLog::start(cli.logs, cli.logs_dir.as_deref(), &cli.inventory) {
+    let mut logs = match RunLog::start(cli.logs, cli.logs_dir.as_deref()) {
         Ok(logs) => logs,
         Err(error) => return report(Err(Error::Log(error)), Ok(None)),
     };
-    if let Err(error) = logs.install() {
-        let error = Error::Log(error);
-        let error_message = error.display_full().to_string();
-        return report(
-            Err(error),
-            logs.finish(Some(&error_message)).map_err(Error::Log),
-        );
+    if let Some(writer) = logs.take_writer() {
+        let filter = EnvFilter::builder()
+            .with_default_directive(LevelFilter::INFO.into())
+            .from_env_lossy();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_ansi(false)
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(writer)
+            .finish();
+        if let Err(source) = tracing::subscriber::set_global_default(subscriber) {
+            let error = Error::Log(logs::LogError::InstallTracing { source });
+            let error_message = error.display_full().to_string();
+            return report(
+                Err(error),
+                logs.finish(Some(&error_message)).map_err(Error::Log),
+            );
+        }
+        logs.record_start(&cli.inventory);
     }
     let result = {
         let cancellation = CancellationToken::new();
