@@ -154,7 +154,7 @@ fn error_output(stderr: &[u8]) -> String {
 
 /// Records an execution failure before returning it.
 fn fail_command<T>(log: CommandLog<'_>, error: Error) -> Result<T, Error> {
-    log.fail(&error.to_string()).map_err(Error::Log)?;
+    log.fail(&error.to_string());
     Err(error)
 }
 
@@ -378,7 +378,7 @@ impl<'a> Invocation<'a> {
             Completion::Exited(status) => status,
         };
         if !status.success() {
-            command_log.complete(status).map_err(Error::Log)?;
+            command_log.complete(status);
             return Err(Error::Process(ProcessError::Failed {
                 command: command_display,
                 status,
@@ -388,7 +388,7 @@ impl<'a> Invocation<'a> {
 
         match consume(output.stdout) {
             Ok(output) => {
-                command_log.complete(status).map_err(Error::Log)?;
+                command_log.complete(status);
                 Ok(output)
             }
             Err(source) => fail_command(
@@ -486,18 +486,17 @@ mod tests {
             .expect("enabled logs should finish")
             .expect("always logs should be retained");
         assert_eq!(
-            fs::read(directory.join("001-ignored-output.stdout"))
-                .expect("ignored output log should be readable"),
+            fs::read(directory.join("001.stdout")).expect("ignored output log should be readable"),
             [0xff]
         );
         assert_eq!(
-            fs::read(directory.join("002-invalid-output.stdout"))
-                .expect("invalid output log should be readable"),
+            fs::read(directory.join("002.stdout")).expect("invalid output log should be readable"),
             [0xff]
         );
-        let run = fs::read_to_string(directory.join("run.log"))
-            .expect("lifecycle log should be readable");
-        assert!(run.contains("command 002 failed duration_ms="));
+        let run =
+            fs::read_to_string(directory.join("run.log")).expect("tracing log should be readable");
+        assert!(run.contains("command: command failed"));
+        assert!(run.contains("id=2"));
         assert!(run.contains("returned non-UTF-8 output"));
     }
 }

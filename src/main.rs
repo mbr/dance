@@ -87,6 +87,14 @@ async fn main() -> ExitCode {
         Ok(logs) => logs,
         Err(error) => return report(Err(Error::Log(error)), Ok(None)),
     };
+    if let Err(error) = logs.install() {
+        let error = Error::Log(error);
+        let error_message = error.display_full().to_string();
+        return report(
+            Err(error),
+            logs.finish(Some(&error_message)).map_err(Error::Log),
+        );
+    }
     let result = {
         let cancellation = CancellationToken::new();
         let processes = ProcessContext::new(&logs, cancellation.clone());

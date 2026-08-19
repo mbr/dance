@@ -1,4 +1,4 @@
-//! Persistent subprocess diagnostics.
+//! Persistent workflow and subprocess diagnostics.
 
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
@@ -9,12 +9,15 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::ExitStatus,
-    sync::Mutex,
+    sync::atomic::{AtomicUsize, Ordering},
     time::Instant,
 };
 
 use clap::ValueEnum;
 use thiserror::Error;
+use tracing::{Dispatch, Span};
+use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
+use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 use uuid::Uuid;
 
 use crate::error::PathIoError;
@@ -31,6 +34,13 @@ pub(crate) enum LogError {
     /// Indicates that a log file could not be written.
     #[error("failed to write log `{}`", .0.path().display())]
     Write(#[source] PathIoError),
+    /// Indicates that the tracing subscriber could not be installed.
+    #[error("failed to install tracing subscriber")]
+    InstallTracing {
+        /// Contains the subscriber installation error.
+        #[source]
+        source: tracing::dispatcher::SetGlobalDefaultError,
+    },
     /// Indicates that a completed log directory could not be removed.
     #[error("failed to remove log directory `{}`", .0.path().display())]
     RemoveDirectory(#[source] PathIoError),
@@ -64,22 +74,14 @@ impl OutputLog {
     }
 }
 
-/// Serializes lifecycle events for one Dance invocation.
-struct RunFile {
-    /// Locates the lifecycle log for error reporting.
-    path: PathBuf,
-    /// Receives lifecycle events.
-    file: File,
-    /// Assigns command identifiers in start order.
-    next_command_id: usize,
-}
-
-/// Guards diagnostic artifacts for one captured subprocess.
+/// Guards diagnostic artifacts and tracing state for one subprocess.
 pub(crate) struct CommandLog<'a> {
-    /// Owns the corresponding run log.
+    /// Owns the tracing subscriber used by the command span.
     run: &'a RunLog,
-    /// Identifies the command in lifecycle events.
+    /// Identifies the command when diagnostics are enabled.
     id: Option<usize>,
+    /// Groups command lifecycle events.
+    span: Span,
     /// Measures command duration monotonically.
     started: Instant,
     /// Receives standard output.
@@ -98,8 +100,12 @@ pub(crate) struct RunLog {
     directory: Option<PathBuf>,
     /// Measures run duration monotonically.
     started: Instant,
-    /// Serializes lifecycle events from concurrent commands.
-    log: Option<Mutex<RunFile>>,
+    /// Allocates command identifiers in start order.
+    next_command_id: AtomicUsize,
+    /// Provides the tracing subscriber installed by the application.
+    dispatch: Option<Dispatch>,
+    /// Flushes and closes the tracing writer.
+    worker: Option<WorkerGuard>,
     /// Records whether the run was explicitly finalized.
     finished: bool,
 }
@@ -117,7 +123,9 @@ impl RunLog {
                 mode,
                 directory: None,
                 started,
-                log: None,
+                next_command_id: AtomicUsize::new(1),
+                dispatch: None,
+                worker: None,
                 finished: false,
             });
         }
@@ -133,22 +141,40 @@ impl RunLog {
         let directory = create_run_directory(&base)?;
         let path = directory.join("run.log");
         let file = open_log(&path)?;
+        let (writer, worker) = NonBlockingBuilder::default().lossy(false).finish(file);
+        let filter = EnvFilter::builder()
+            .with_default_directive(LevelFilter::INFO.into())
+            .from_env_lossy();
+        let subscriber = tracing_subscriber::fmt()
+            .compact()
+            .with_ansi(false)
+            .with_env_filter(filter)
+            .with_target(false)
+            .with_writer(writer)
+            .finish();
         let log = Self {
             mode,
             directory: Some(directory),
             started,
-            log: Some(Mutex::new(RunFile {
-                path,
-                file,
-                next_command_id: 1,
-            })),
+            next_command_id: AtomicUsize::new(1),
+            dispatch: Some(Dispatch::new(subscriber)),
+            worker: Some(worker),
             finished: false,
         };
-        log.write_event(&format!(
-            "run started format=1 inventory={inventory:?} arguments={}",
-            format_arguments(std::env::args_os())
-        ))?;
+        let arguments = std::env::args_os().collect::<Vec<_>>();
+        log.with_dispatch(|| {
+            tracing::info!(format = 2, inventory = ?inventory, ?arguments, "run started");
+        });
         Ok(log)
+    }
+
+    /// Installs the run's tracing subscriber as the process default.
+    pub(crate) fn install(&self) -> Result<(), LogError> {
+        let Some(dispatch) = &self.dispatch else {
+            return Ok(());
+        };
+        tracing::dispatcher::set_global_default(dispatch.clone())
+            .map_err(|source| LogError::InstallTracing { source })
     }
 
     /// Records and starts a subprocess.
@@ -163,41 +189,38 @@ impl RunLog {
             return Ok(CommandLog {
                 run: self,
                 id: None,
+                span: Span::none(),
                 started,
                 stdout: None,
                 stderr: None,
                 finished: false,
             });
         };
-        let mut log = self
-            .log
-            .as_ref()
-            .expect("enabled logs should have a lifecycle file")
-            .lock()
-            .expect("run log lock should not be poisoned");
-        let id = log.next_command_id;
-        log.next_command_id += 1;
-        let stem = format!("{id:03}-{}", sanitize(label));
-        let stdout_name = format!("{stem}.stdout");
-        let stderr_name = format!("{stem}.stderr");
+        let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
+        let stdout_name = format!("{id:03}.stdout");
+        let stderr_name = format!("{id:03}.stderr");
         let stdout = directory.join(&stdout_name);
         let stderr = directory.join(&stderr_name);
         let stdout_log = open_log(&stdout)?;
         let stderr_log = open_log(&stderr)?;
-        let command_arguments =
-            std::iter::once(program.as_ref().to_owned()).chain(arguments.iter().cloned());
-        write_event(
-            &mut log,
-            &format!(
-                "command {id:03} started label={label:?} arguments={} stdout={stdout_name:?} stderr={stderr_name:?}",
-                format_arguments(command_arguments)
-            ),
-        )?;
-        drop(log);
+        let span = self.with_dispatch(|| {
+            let span = tracing::info_span!("command", id);
+            tracing::info!(
+                parent: &span,
+                label,
+                program = ?program.as_ref(),
+                ?arguments,
+                stdout = stdout_name,
+                stderr = stderr_name,
+                "command started"
+            );
+            span
+        });
 
         Ok(CommandLog {
             run: self,
             id: Some(id),
+            span,
             started,
             stdout: Some(OutputLog {
                 path: stdout,
@@ -217,16 +240,14 @@ impl RunLog {
             self.finished = true;
             return Ok(None);
         };
-        let succeeded = error.is_none();
-        let status = if succeeded { "succeeded" } else { "failed" };
-        let error = error.map_or_else(String::new, |error| format!(" error={error:?}"));
-        self.write_event(&format!(
-            "run {status} duration_ms={}{}",
-            elapsed_milliseconds(self.started),
-            error
-        ))?;
+        let duration_ms = elapsed_milliseconds(self.started);
+        self.with_dispatch(|| match error {
+            Some(error) => tracing::warn!(duration_ms, error, "run failed"),
+            None => tracing::info!(duration_ms, "run succeeded"),
+        });
+        self.close_writer();
 
-        let retained = if succeeded && matches!(self.mode, LogMode::OnError) {
+        let retained = if error.is_none() && matches!(self.mode, LogMode::OnError) {
             fs::remove_dir_all(&directory)
                 .map_err(|source| LogError::RemoveDirectory(PathIoError::new(directory, source)))?;
             None
@@ -237,20 +258,24 @@ impl RunLog {
         Ok(retained)
     }
 
-    /// Appends one lifecycle event.
-    fn write_event(&self, event: &str) -> Result<(), LogError> {
-        let Some(log) = &self.log else {
-            return Ok(());
-        };
-        let mut log = log.lock().expect("run log lock should not be poisoned");
-        write_event(&mut log, event)
+    /// Executes an operation with the run's tracing subscriber.
+    fn with_dispatch<T>(&self, operation: impl FnOnce() -> T) -> T {
+        match &self.dispatch {
+            Some(dispatch) => tracing::dispatcher::with_default(dispatch, operation),
+            None => operation(),
+        }
+    }
+
+    /// Flushes pending tracing events and closes the log file.
+    fn close_writer(&mut self) {
+        drop(self.worker.take());
     }
 
     /// Marks an unfinished command as interrupted.
-    fn interrupt_command(&self, id: usize, duration_ms: u64) {
-        let _result = self.write_event(&format!(
-            "command {id:03} interrupted duration_ms={duration_ms}"
-        ));
+    fn interrupt_command(&self, span: &Span, duration_ms: u64) {
+        self.with_dispatch(|| {
+            tracing::warn!(parent: span, duration_ms, "command interrupted");
+        });
     }
 }
 
@@ -261,64 +286,58 @@ impl CommandLog<'_> {
     }
 
     /// Completes the command after its output has been captured.
-    pub(crate) fn complete(mut self, status: ExitStatus) -> Result<(), LogError> {
-        let Some(id) = self.id else {
+    pub(crate) fn complete(mut self, status: ExitStatus) {
+        if self.id.is_none() {
             self.finished = true;
-            return Ok(());
-        };
-        let state = if status.success() {
-            "succeeded"
-        } else {
-            "failed"
-        };
-        let exit_code = status
-            .code()
-            .map_or_else(|| "none".to_owned(), |code| code.to_string());
-        let result = self.run.write_event(&format!(
-            "command {id:03} {state} exit_code={exit_code} duration_ms={}",
-            elapsed_milliseconds(self.started)
-        ));
-        self.finished = result.is_ok();
-        result
+            return;
+        }
+        let duration_ms = elapsed_milliseconds(self.started);
+        let exit_code = status.code();
+        self.run.with_dispatch(|| {
+            if status.success() {
+                tracing::info!(parent: &self.span, ?exit_code, duration_ms, "command succeeded");
+            } else {
+                tracing::warn!(parent: &self.span, ?exit_code, duration_ms, "command failed");
+            }
+        });
+        self.finished = true;
     }
 
     /// Marks the command as failed outside normal process completion.
-    pub(crate) fn fail(mut self, error: &str) -> Result<(), LogError> {
-        let Some(id) = self.id else {
+    pub(crate) fn fail(mut self, error: &str) {
+        if self.id.is_none() {
             self.finished = true;
-            return Ok(());
-        };
-        let result = self.run.write_event(&format!(
-            "command {id:03} failed duration_ms={} error={error:?}",
-            elapsed_milliseconds(self.started)
-        ));
-        self.finished = result.is_ok();
-        result
+            return;
+        }
+        let duration_ms = elapsed_milliseconds(self.started);
+        self.run.with_dispatch(|| {
+            tracing::warn!(parent: &self.span, duration_ms, error, "command failed");
+        });
+        self.finished = true;
     }
 }
 
 impl Drop for CommandLog<'_> {
     /// Preserves commands that were not explicitly finalized.
     fn drop(&mut self) {
-        if !self.finished
-            && let Some(id) = self.id
-        {
+        if !self.finished && self.id.is_some() {
             self.run
-                .interrupt_command(id, elapsed_milliseconds(self.started));
+                .interrupt_command(&self.span, elapsed_milliseconds(self.started));
         }
     }
 }
 
 impl Drop for RunLog {
-    /// Preserves unfinished runs and marks them as interrupted.
+    /// Flushes interrupted runs and preserves their diagnostic directory.
     fn drop(&mut self) {
         if self.finished || self.directory.is_none() {
             return;
         }
-        let _result = self.write_event(&format!(
-            "run interrupted duration_ms={}",
-            elapsed_milliseconds(self.started)
-        ));
+        let duration_ms = elapsed_milliseconds(self.started);
+        self.with_dispatch(|| {
+            tracing::warn!(duration_ms, "run interrupted");
+        });
+        self.close_writer();
     }
 }
 
@@ -330,7 +349,7 @@ fn state_directory(xdg_state_home: Option<OsString>, home: Option<PathBuf>) -> O
         .or_else(|| home.map(|path| path.join(".local/state")))
 }
 
-/// Returns a saturated millisecond duration for lifecycle events.
+/// Returns a saturated millisecond duration for diagnostic events.
 fn elapsed_milliseconds(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
 }
@@ -345,40 +364,6 @@ fn create_run_directory(base: &Path) -> Result<PathBuf, LogError> {
         .create(&path)
         .map_err(|source| LogError::CreateDirectory(PathIoError::new(path.clone(), source)))?;
     Ok(path)
-}
-
-/// Formats operating-system arguments as an unambiguous diagnostic list.
-fn format_arguments(arguments: impl IntoIterator<Item = impl AsRef<OsStr>>) -> String {
-    let arguments = arguments
-        .into_iter()
-        .map(|argument| format!("{:?}", argument.as_ref()))
-        .collect::<Vec<_>>();
-    format!("[{}]", arguments.join(", "))
-}
-
-/// Appends one complete lifecycle event to a locked run file.
-fn write_event(log: &mut RunFile, event: &str) -> Result<(), LogError> {
-    writeln!(log.file, "{event}")
-        .map_err(|source| LogError::Write(PathIoError::new(log.path.clone(), source)))
-}
-
-/// Converts a command label into a portable filename component.
-fn sanitize(label: &str) -> String {
-    let mut sanitized = String::with_capacity(label.len());
-    for character in label.chars() {
-        let character = if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
-            character
-        } else {
-            '-'
-        };
-        if character != '-' || (!sanitized.is_empty() && !sanitized.ends_with('-')) {
-            sanitized.push(character);
-        }
-    }
-    if sanitized.ends_with('-') {
-        sanitized.pop();
-    }
-    sanitized
 }
 
 /// Creates a truncated diagnostic file.
@@ -418,7 +403,7 @@ mod tests {
         );
     }
 
-    /// Checks that retained runs contain command metadata and exact output.
+    /// Checks that retained runs contain tracing and output artifacts.
     #[test]
     fn retained_run_contains_command_artifacts() {
         let base = tempdir().expect("temporary directory should be created");
@@ -429,7 +414,7 @@ mod tests {
         )
         .expect("run log should start");
         let mut command = logs
-            .command("--review / party--", "ssh", &["party".into()])
+            .command("review party", "ssh", &["party".into()])
             .expect("command log should start");
         let (mut stdout, mut stderr) = command.take_outputs();
         stdout
@@ -445,32 +430,29 @@ mod tests {
         let status = Command::new("true")
             .status()
             .expect("successful status should be produced");
-        command
-            .complete(status)
-            .expect("command log should complete");
+        command.complete(status);
         let directory = logs
             .finish(None)
             .expect("run log should finish")
             .expect("always logs should be retained");
 
         assert_eq!(
-            fs::read(directory.join("001-review-party.stdout"))
-                .expect("standard output log should be readable"),
+            fs::read(directory.join("001.stdout")).expect("standard output log should be readable"),
             b"standard output\n"
         );
         assert_eq!(
-            fs::read(directory.join("001-review-party.stderr"))
-                .expect("standard error log should be readable"),
+            fs::read(directory.join("001.stderr")).expect("standard error log should be readable"),
             b"standard error\n"
         );
-        let run = fs::read_to_string(directory.join("run.log"))
-            .expect("lifecycle log should be readable");
-        assert!(run.contains("run started format=1 inventory=\"inventory.toml\" arguments=["));
-        assert!(run.contains(
-            "command 001 started label=\"--review / party--\" arguments=[\"ssh\", \"party\"] stdout=\"001-review-party.stdout\" stderr=\"001-review-party.stderr\""
-        ));
-        assert!(run.contains("command 001 succeeded exit_code=0 duration_ms="));
-        assert!(run.contains("run succeeded duration_ms="));
+        let trace =
+            fs::read_to_string(directory.join("run.log")).expect("trace log should be readable");
+        assert!(trace.contains("run started"));
+        assert!(trace.contains("command: command started"));
+        assert!(trace.contains("id=1"));
+        assert!(trace.contains("label=\"review party\""));
+        assert!(trace.contains("stdout=\"001.stdout\""));
+        assert!(trace.contains("command: command succeeded"));
+        assert!(trace.contains("run succeeded"));
     }
 
     /// Checks fail-safe retention and successful cleanup for automatic logs.
@@ -488,9 +470,9 @@ mod tests {
             .clone()
             .expect("enabled logs should have a directory");
         drop(interrupted);
-        let run = fs::read_to_string(interrupted_path.join("run.log"))
-            .expect("interrupted lifecycle log should be readable");
-        assert!(run.contains("run interrupted duration_ms="));
+        let trace = fs::read_to_string(interrupted_path.join("run.log"))
+            .expect("interrupted trace log should be readable");
+        assert!(trace.contains("run interrupted"));
 
         let successful = RunLog::start(
             LogMode::OnError,
