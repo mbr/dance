@@ -2,6 +2,8 @@
 
 #[cfg(unix)]
 use std::os::unix::fs::DirBuilderExt;
+#[cfg(test)]
+use std::sync::Mutex;
 use std::{
     env,
     ffi::{OsStr, OsString},
@@ -333,26 +335,31 @@ fn open_log(path: &Path) -> Result<File, LogError> {
         .map_err(|source| LogError::Write(PathedError::new(path.to_path_buf(), source)))
 }
 
+/// Serializes tests that replace tracing's thread-local subscriber.
+#[cfg(test)]
+pub(crate) static SUBSCRIBER_LOCK: Mutex<()> = Mutex::new(());
+
+/// Creates an isolated subscriber for a log test.
+#[cfg(test)]
+pub(crate) fn test_subscriber(logs: &mut RunLog) -> impl tracing::Subscriber {
+    let writer = logs
+        .take_writer()
+        .expect("enabled logs should provide a tracing writer");
+    tracing_subscriber::fmt()
+        .compact()
+        .with_ansi(false)
+        .with_target(false)
+        .with_writer(writer)
+        .finish()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path, process::Command};
 
     use tempfile::tempdir;
 
-    use super::{LogMode, RunLog, state_directory};
-
-    /// Creates an isolated subscriber for a synchronous log test.
-    fn test_subscriber(logs: &mut RunLog) -> impl tracing::Subscriber {
-        let writer = logs
-            .take_writer()
-            .expect("enabled logs should provide a tracing writer");
-        tracing_subscriber::fmt()
-            .compact()
-            .with_ansi(false)
-            .with_target(false)
-            .with_writer(writer)
-            .finish()
-    }
+    use super::{LogMode, RunLog, SUBSCRIBER_LOCK, state_directory, test_subscriber};
 
     /// Checks XDG state overrides and the home-directory fallback.
     #[test]
@@ -380,6 +387,9 @@ mod tests {
     /// Checks that retained runs contain tracing and output artifacts.
     #[test]
     fn retained_run_contains_command_artifacts() {
+        let _subscriber_lock = SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
         let mut logs =
             RunLog::start(LogMode::Always, Some(base.path())).expect("run log should start");
@@ -420,7 +430,7 @@ mod tests {
         let trace =
             fs::read_to_string(directory.join("run.log")).expect("trace log should be readable");
         assert!(trace.contains("run started"));
-        assert!(trace.contains("command: command started"));
+        assert!(trace.contains("command: command started"), "{trace}");
         assert!(trace.contains("id=1"));
         assert!(trace.contains("label=\"review party\""));
         assert!(trace.contains("stdout=\"001.stdout\""));
@@ -431,6 +441,9 @@ mod tests {
     /// Checks fail-safe retention and successful cleanup for automatic logs.
     #[test]
     fn automatic_logs_preserve_interruptions_and_remove_successes() {
+        let _subscriber_lock = SUBSCRIBER_LOCK
+            .lock()
+            .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
         let mut interrupted =
             RunLog::start(LogMode::OnError, Some(base.path())).expect("run log should start");
