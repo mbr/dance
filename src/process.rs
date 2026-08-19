@@ -123,6 +123,19 @@ impl<'a> ProcessContext<'a> {
     pub(crate) fn new(logs: &'a RunLog, cancellation: CancellationToken) -> Self {
         Self { logs, cancellation }
     }
+
+    /// Creates subprocess services with child-scoped cancellation.
+    pub(crate) fn child(&self) -> Self {
+        Self {
+            logs: self.logs,
+            cancellation: self.cancellation.child_token(),
+        }
+    }
+
+    /// Cancels commands using this context without cancelling its parent.
+    pub(crate) fn cancel(&self) {
+        self.cancellation.cancel();
+    }
 }
 
 /// Describes how a process wait completed.

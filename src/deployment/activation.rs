@@ -24,6 +24,8 @@ pub(super) enum Outcome {
     RecoveryRequired(Error),
     /// The host was activated but could not be cleaned.
     CleanupFailed(Error),
+    /// The host was activated but its deployment lease could not be released cleanly.
+    LeaseReleaseFailed(Error),
 }
 
 impl Outcome {
@@ -32,7 +34,10 @@ impl Outcome {
         match self {
             Self::Activated => status::finish(progress, host),
             Self::RecoveryRequired(_) => status::recovery_required(progress),
-            Self::Failed(_) | Self::RolledBack(_) | Self::CleanupFailed(_) => {
+            Self::Failed(_)
+            | Self::RolledBack(_)
+            | Self::CleanupFailed(_)
+            | Self::LeaseReleaseFailed(_) => {
                 status::fail(progress);
             }
         }
@@ -52,6 +57,8 @@ pub(super) struct Summary {
     recovery_required: usize,
     /// Counts successful activations whose cleanup failed.
     cleanup_failed: usize,
+    /// Counts successful activations whose lease release failed.
+    lease_release_failed: usize,
     /// Retains the first deployment error.
     first_error: Option<Error>,
 }
@@ -81,6 +88,11 @@ impl Summary {
                 self.cleanup_failed += 1;
                 error
             }
+            Outcome::LeaseReleaseFailed(error) => {
+                self.activated += 1;
+                self.lease_release_failed += 1;
+                error
+            }
         };
         self.first_error.get_or_insert(error);
     }
@@ -102,6 +114,7 @@ impl Display for Summary {
             (self.rolled_back, "rolled back"),
             (self.recovery_required, "recovery required"),
             (self.cleanup_failed, "cleanup failed"),
+            (self.lease_release_failed, "lease release failed"),
         ] {
             if count != 0 {
                 write!(formatter, ", {count} {label}")?;

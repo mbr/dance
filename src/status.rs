@@ -24,6 +24,8 @@ const SPINNER_TICKS: &str =
 /// Identifies a phase of host work.
 #[derive(Clone, Copy)]
 pub(crate) enum DeploymentPhase {
+    /// Acquires exclusive access and validates reviewed state.
+    Locking,
     /// Builds and temporarily activates the desired system.
     Testing,
     /// Discovers and builds a configured verifier.
@@ -43,7 +45,7 @@ impl DeploymentPhase {
     fn style(self) -> Style {
         let style = Style::new().for_stderr();
         match self {
-            Self::Testing | Self::BuildingVerifier => style.blue(),
+            Self::Locking | Self::Testing | Self::BuildingVerifier => style.blue(),
             Self::RunningVerifier | Self::CollectingGarbage => style.yellow(),
             Self::Switching => style.magenta(),
             Self::RollingBack => style.red(),
@@ -54,6 +56,7 @@ impl DeploymentPhase {
 impl Display for DeploymentPhase {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::Locking => "locking",
             Self::Testing => "testing",
             Self::BuildingVerifier => "building verifier",
             Self::RunningVerifier => "running verifier",

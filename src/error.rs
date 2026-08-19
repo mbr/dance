@@ -8,7 +8,11 @@ use std::{
 use thiserror::Error;
 
 use crate::{
-    inventory::InventoryError, logs::LogError, process::ProcessError, store_path::StorePathError,
+    inventory::InventoryError,
+    lock::LockError,
+    logs::LogError,
+    process::ProcessError,
+    store_path::{StorePath, StorePathError},
 };
 
 /// Associates an input/output failure with the affected path.
@@ -46,6 +50,21 @@ pub(crate) enum Error {
     /// Indicates that an inventory operation failed.
     #[error(transparent)]
     Inventory(InventoryError),
+    /// Indicates that a deployment lease operation failed.
+    #[error(transparent)]
+    Lock(LockError),
+    /// Indicates that a host changed after deployment review.
+    #[error(
+        "host `{host}` changed from reviewed system `{reviewed}` to `{active}` before deployment"
+    )]
+    DeploymentStateChanged {
+        /// Identifies the inventory host.
+        host: String,
+        /// Identifies the system observed during review.
+        reviewed: StorePath,
+        /// Identifies the system observed under the deployment lease.
+        active: StorePath,
+    },
     /// Indicates that flake metadata was malformed.
     #[error("failed to parse metadata for flake `{}`", path.display())]
     ParseFlakeMetadata {
