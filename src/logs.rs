@@ -75,8 +75,8 @@ impl OutputLog {
 
 /// Guards diagnostic artifacts and tracing state for one subprocess.
 pub(crate) struct CommandLog<'a> {
-    /// Owns the tracing subscriber used by the command span.
-    run: &'a RunLog,
+    /// Keeps the run's tracing writer alive for the command span.
+    _run: &'a RunLog,
     /// Identifies the command when diagnostics are enabled.
     id: Option<usize>,
     /// Groups command lifecycle events.
@@ -172,7 +172,7 @@ impl RunLog {
         let started = Instant::now();
         let Some(directory) = &self.directory else {
             return Ok(CommandLog {
-                run: self,
+                _run: self,
                 id: None,
                 span: Span::none(),
                 started,
@@ -200,7 +200,7 @@ impl RunLog {
         );
 
         Ok(CommandLog {
-            run: self,
+            _run: self,
             id: Some(id),
             span,
             started,
@@ -244,11 +244,6 @@ impl RunLog {
     fn close_writer(&mut self) {
         drop(self.worker.take());
     }
-
-    /// Marks an unfinished command as interrupted.
-    fn interrupt_command(&self, span: &Span, duration_ms: u64) {
-        tracing::warn!(parent: span, duration_ms, "command interrupted");
-    }
 }
 
 impl CommandLog<'_> {
@@ -289,8 +284,8 @@ impl Drop for CommandLog<'_> {
     /// Preserves commands that were not explicitly finalized.
     fn drop(&mut self) {
         if !self.finished && self.id.is_some() {
-            self.run
-                .interrupt_command(&self.span, elapsed_milliseconds(self.started));
+            let duration_ms = elapsed_milliseconds(self.started);
+            tracing::warn!(parent: &self.span, duration_ms, "command interrupted");
         }
     }
 }
