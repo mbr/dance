@@ -1,4 +1,24 @@
-//! Subprocess output capture and progress reporting.
+//! Connects subprocess output streams to command results, diagnostic logs, and progress bars.
+//!
+//! [`Invocation`](super::Invocation) configures `tokio-process-tools` to expose stdout and stderr
+//! as reliable, replayable streams. Immediately after spawning the child it calls
+//! [`OutputConsumers::attach`] once, before sealing output replay. The resulting consumers perform
+//! three jobs for each stream:
+//!
+//! - retain the exact bytes for the eventual command result or error;
+//! - copy the bytes to the command's persistent [`OutputLog`], when logging is enabled;
+//! - extract recent human-readable text for the command's progress bar.
+//!
+//! While the child runs, `Invocation` polls [`OutputConsumers::refresh_interval`] alongside process
+//! completion and cancellation, calling [`OutputConsumers::refresh`] on each tick. Progress updates
+//! are lossy presentation only; they do not alter the exact captured bytes.
+//!
+//! Once the child has exited or been terminated, `Invocation` consumes the collectors through
+//! [`OutputConsumers::finish`]. That method waits for both pipes to reach EOF, reports delayed
+//! stream or log failures, performs one final progress refresh, and returns stdout and stderr
+//! separately. Draining has a timeout because descendant processes can inherit the pipe handles and
+//! keep them open after the direct child exits. Normal application code uses
+//! [`Invocation`](super::Invocation) rather than this module directly.
 
 use std::{
     sync::{Arc, Mutex},
@@ -23,7 +43,10 @@ const OUTPUT_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 /// Limits output draining after the child process exits.
 const OUTPUT_EOF_TIMEOUT: Duration = Duration::from_secs(3);
 
-/// Contains the separately captured subprocess output streams.
+/// Contains the exact output bytes returned after both stream consumers reach EOF.
+///
+/// Stream ordering is preserved within stdout and stderr, but ordering between the two independent
+/// streams is intentionally not reconstructed.
 pub(super) struct CapturedOutput {
     /// Contains standard output bytes.
     pub(super) stdout: Vec<u8>,
@@ -31,7 +54,10 @@ pub(super) struct CapturedOutput {
     pub(super) stderr: Vec<u8>,
 }
 
-/// Captures, logs, and reports one subprocess output stream.
+/// Visits chunks from one subprocess stream without allowing logging failures to stop drainage.
+///
+/// A write failure is retained and returned at EOF. Continuing to consume chunks prevents the child
+/// from blocking indefinitely against a full output pipe while its error is being handled.
 struct Capture {
     /// Retains output for command results and errors.
     bytes: Vec<u8>,
@@ -71,7 +97,11 @@ impl StreamVisitor for Capture {
     }
 }
 
-/// Owns consumers attached to a subprocess's output streams.
+/// Owns the sole consumers attached to one subprocess's stdout and stderr streams.
+///
+/// Construct this immediately after spawning with [`Self::attach`], periodically call
+/// [`Self::refresh`] while waiting for the child, and finally consume it with [`Self::finish`] after
+/// process completion or termination.
 pub(super) struct OutputConsumers {
     /// Captures standard output.
     stdout: Consumer<Result<Vec<u8>, LogError>>,
@@ -82,7 +112,11 @@ pub(super) struct OutputConsumers {
 }
 
 impl OutputConsumers {
-    /// Attaches consumers to both output streams.
+    /// Attaches the sole consumer to each replayable output stream.
+    ///
+    /// This must happen before the process output replay is sealed. `stdout_log` and `stderr_log`
+    /// are the optional files obtained from the corresponding command log. Calling this after
+    /// another consumer has subscribed is a programming error.
     pub(super) fn attach<D, R>(
         stdout: &SingleSubscriberOutputStream<D, R>,
         stderr: &SingleSubscriberOutputStream<D, R>,
@@ -101,19 +135,29 @@ impl OutputConsumers {
         }
     }
 
-    /// Creates the timer used to coalesce progress updates.
+    /// Creates the timer the process wait loop polls to coalesce progress updates.
+    ///
+    /// Output capture and diagnostic writes happen as chunks arrive; only terminal redraws wait for
+    /// this timer.
     pub(super) fn refresh_interval(&self) -> time::Interval {
         let mut interval = time::interval(OUTPUT_REFRESH_INTERVAL);
         interval.set_missed_tick_behavior(time::MissedTickBehavior::Skip);
         interval
     }
 
-    /// Displays the latest observed subprocess output.
+    /// Moves the latest displayable output record into the progress bar, if one is pending.
+    ///
+    /// Stdout and stderr share one slot, so whichever stream most recently produced displayable
+    /// text determines the next message.
     pub(super) fn refresh(&self, progress: &ProgressBar) {
         refresh_progress(&self.latest, progress);
     }
 
-    /// Drains both output streams and returns their captured bytes.
+    /// Drains both streams after child completion and returns their exact captured bytes.
+    ///
+    /// This consumes the collectors, waits for both pipes concurrently, propagates consumer and
+    /// diagnostic-write errors, and performs a final progress refresh. It fails after
+    /// [`OUTPUT_EOF_TIMEOUT`] rather than hanging on pipe handles inherited by descendants.
     pub(super) async fn finish(
         self,
         command: &str,
