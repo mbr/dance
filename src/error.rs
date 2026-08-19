@@ -1,9 +1,6 @@
 //! Application error types.
 
-use std::{
-    io,
-    path::{Path, PathBuf},
-};
+use std::{error::Error as StdError, io, path::PathBuf};
 
 use thiserror::Error;
 
@@ -15,26 +12,27 @@ use crate::{
     store_path::{StorePath, StorePathError},
 };
 
-/// Associates an input/output failure with the affected path.
+/// Associates a failure with the affected path.
 #[derive(Debug, Error)]
-#[error("I/O error")]
-pub(crate) struct PathIoError {
+#[error("error at `{}`", path.display())]
+pub(crate) struct PathedError<E = io::Error>
+where
+    E: StdError + 'static,
+{
     /// Identifies the affected filesystem entry.
-    path: PathBuf,
-    /// Contains the input/output error.
+    pub(crate) path: PathBuf,
+    /// Contains the underlying error.
     #[source]
-    source: io::Error,
+    source: E,
 }
 
-impl PathIoError {
-    /// Associates an input/output failure with its path.
-    pub(crate) fn new(path: PathBuf, source: io::Error) -> Self {
+impl<E> PathedError<E>
+where
+    E: StdError + 'static,
+{
+    /// Associates a failure with its path.
+    pub(crate) fn new(path: PathBuf, source: E) -> Self {
         Self { path, source }
-    }
-
-    /// Returns the affected path.
-    pub(crate) fn path(&self) -> &Path {
-        &self.path
     }
 }
 
@@ -92,14 +90,8 @@ pub(crate) enum Error {
         path: PathBuf,
     },
     /// Indicates that flake metadata was malformed.
-    #[error("failed to parse metadata for flake `{}`", path.display())]
-    ParseFlakeMetadata {
-        /// Identifies the flake.
-        path: PathBuf,
-        /// Contains the JSON decoding error.
-        #[source]
-        source: serde_json::Error,
-    },
+    #[error("failed to parse flake metadata")]
+    ParseFlakeMetadata(#[source] PathedError<serde_json::Error>),
     /// Indicates that verifier metadata was malformed.
     #[error("failed to parse verifier metadata for host `{host}`")]
     ParseVerifier {

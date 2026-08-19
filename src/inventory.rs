@@ -10,7 +10,7 @@ use indexmap::IndexMap;
 use serde::Deserialize;
 use thiserror::Error;
 
-use crate::error::PathIoError;
+use crate::error::PathedError;
 
 /// Describes a failure encountered while using an inventory.
 #[derive(Debug, Error)]
@@ -36,17 +36,11 @@ pub(crate) enum InventoryError {
 #[derive(Debug, Error)]
 pub(crate) enum LoadError {
     /// Indicates that the inventory could not be read.
-    #[error("failed to read inventory `{}`", .0.path().display())]
-    Read(#[source] PathIoError),
+    #[error("failed to read inventory")]
+    Read(#[source] PathedError),
     /// Indicates that the inventory was malformed.
-    #[error("failed to parse inventory `{}`", path.display())]
-    Parse {
-        /// Identifies the inventory.
-        path: PathBuf,
-        /// Contains the parsing error.
-        #[source]
-        source: toml::de::Error,
-    },
+    #[error("failed to parse inventory")]
+    Parse(#[source] PathedError<toml::de::Error>),
 }
 
 /// Contains the hosts managed by Dance.
@@ -70,16 +64,16 @@ impl Inventory {
     /// Loads an inventory and resolves its flake paths.
     pub(crate) fn load(path: &Path) -> Result<Self, InventoryError> {
         let contents = fs::read_to_string(path).map_err(|source| {
-            InventoryError::Load(LoadError::Read(PathIoError::new(
+            InventoryError::Load(LoadError::Read(PathedError::new(
                 path.to_path_buf(),
                 source,
             )))
         })?;
         let mut inventory: Self = toml::from_str(&contents).map_err(|source| {
-            InventoryError::Load(LoadError::Parse {
-                path: path.to_path_buf(),
+            InventoryError::Load(LoadError::Parse(PathedError::new(
+                path.to_path_buf(),
                 source,
-            })
+            )))
         })?;
         let directory = path.parent().unwrap_or_else(|| Path::new("."));
 
@@ -233,14 +227,14 @@ mod tests {
         let missing = directory.path().join("missing.toml");
         assert!(matches!(
             Inventory::load(&missing),
-            Err(InventoryError::Load(LoadError::Read(error))) if error.path() == missing
+            Err(InventoryError::Load(LoadError::Read(error))) if error.path == missing
         ));
 
         let malformed = directory.path().join("malformed.toml");
         std::fs::write(&malformed, "not TOML =").expect("malformed inventory should be written");
         assert!(matches!(
             Inventory::load(&malformed),
-            Err(InventoryError::Load(LoadError::Parse { path, .. })) if path == malformed
+            Err(InventoryError::Load(LoadError::Parse(error))) if error.path == malformed
         ));
     }
 

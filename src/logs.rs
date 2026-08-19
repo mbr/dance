@@ -20,7 +20,7 @@ use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_subscriber::{EnvFilter, filter::LevelFilter};
 use uuid::Uuid;
 
-use crate::error::PathIoError;
+use crate::error::PathedError;
 
 /// Describes a failure encountered while recording diagnostics.
 #[derive(Debug, Error)]
@@ -29,11 +29,11 @@ pub(crate) enum LogError {
     #[error("could not determine the user state directory")]
     StateDirectoryUnavailable,
     /// Indicates that a log directory could not be created.
-    #[error("failed to create log directory `{}`", .0.path().display())]
-    CreateDirectory(#[source] PathIoError),
+    #[error("failed to create log directory")]
+    CreateDirectory(#[source] PathedError),
     /// Indicates that a log file could not be written.
-    #[error("failed to write log `{}`", .0.path().display())]
-    Write(#[source] PathIoError),
+    #[error("failed to write log")]
+    Write(#[source] PathedError),
     /// Indicates that the tracing subscriber could not be installed.
     #[error("failed to install tracing subscriber")]
     InstallTracing {
@@ -42,8 +42,8 @@ pub(crate) enum LogError {
         source: tracing::dispatcher::SetGlobalDefaultError,
     },
     /// Indicates that a completed log directory could not be removed.
-    #[error("failed to remove log directory `{}`", .0.path().display())]
-    RemoveDirectory(#[source] PathIoError),
+    #[error("failed to remove log directory")]
+    RemoveDirectory(#[source] PathedError),
 }
 
 /// Selects when completed run logs are retained.
@@ -70,7 +70,7 @@ impl OutputLog {
     pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), LogError> {
         self.file
             .write_all(bytes)
-            .map_err(|source| LogError::Write(PathIoError::new(self.path.clone(), source)))
+            .map_err(|source| LogError::Write(PathedError::new(self.path.clone(), source)))
     }
 }
 
@@ -137,7 +137,7 @@ impl RunLog {
                 .join("dance/logs"),
         };
         fs::create_dir_all(&base)
-            .map_err(|source| LogError::CreateDirectory(PathIoError::new(base.clone(), source)))?;
+            .map_err(|source| LogError::CreateDirectory(PathedError::new(base.clone(), source)))?;
         let directory = create_run_directory(&base)?;
         let path = directory.join("run.log");
         let file = open_log(&path)?;
@@ -249,7 +249,7 @@ impl RunLog {
 
         let retained = if error.is_none() && matches!(self.mode, LogMode::OnError) {
             fs::remove_dir_all(&directory)
-                .map_err(|source| LogError::RemoveDirectory(PathIoError::new(directory, source)))?;
+                .map_err(|source| LogError::RemoveDirectory(PathedError::new(directory, source)))?;
             None
         } else {
             Some(directory)
@@ -362,14 +362,14 @@ fn create_run_directory(base: &Path) -> Result<PathBuf, LogError> {
     builder.mode(0o700);
     builder
         .create(&path)
-        .map_err(|source| LogError::CreateDirectory(PathIoError::new(path.clone(), source)))?;
+        .map_err(|source| LogError::CreateDirectory(PathedError::new(path.clone(), source)))?;
     Ok(path)
 }
 
 /// Creates a truncated diagnostic file.
 fn open_log(path: &Path) -> Result<File, LogError> {
     File::create(path)
-        .map_err(|source| LogError::Write(PathIoError::new(path.to_path_buf(), source)))
+        .map_err(|source| LogError::Write(PathedError::new(path.to_path_buf(), source)))
 }
 
 #[cfg(test)]

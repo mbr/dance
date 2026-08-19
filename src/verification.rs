@@ -7,7 +7,7 @@ use indicatif::ProgressBar;
 use serde::Deserialize;
 
 use crate::{
-    error::Error,
+    error::{Error, PathedError},
     inventory::{Host, Inventory},
     process::{Invocation, ProcessContext},
     status::{self, DeploymentPhase, ProgressDisplay},
@@ -69,11 +69,9 @@ impl Verifier {
         .argument(host.flake_path())
         .output()
         .await?;
-        let metadata: FlakeMetadata =
-            serde_json::from_str(&metadata).map_err(|source| Error::ParseFlakeMetadata {
-                path: host.flake_path().to_path_buf(),
-                source,
-            })?;
+        let metadata: FlakeMetadata = serde_json::from_str(&metadata).map_err(|source| {
+            Error::ParseFlakeMetadata(PathedError::new(host.flake_path().to_path_buf(), source))
+        })?;
         let flake_reference = serde_json::to_string(&metadata.resolved_url)
             .expect("flake reference should serialize as a Nix string");
         let flake_name = serde_json::to_string(host.flake_name())
