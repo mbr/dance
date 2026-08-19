@@ -314,7 +314,7 @@ async fn terminate(child: &mut Child) {
     let _ = child.kill().await;
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests {
     use tempfile::tempdir;
     use tokio::process::Command;

@@ -54,6 +54,7 @@
             version = cargoToml.package.version;
             description = cargoToml.package.description;
             nativeBuildInputs = with pkgs; [ llvmPackages.bintools ];
+            nativeCheckInputs = [ pkgs.git ] ++ pkgs.lib.optionals pkgs.stdenv.isLinux [ pkgs.util-linux ];
 
             src = pkgs.lib.cleanSource ./.;
 
