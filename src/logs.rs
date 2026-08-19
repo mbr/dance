@@ -35,13 +35,6 @@ pub(crate) enum LogError {
     /// Indicates that a log file could not be written.
     #[error("failed to write log")]
     Write(#[source] PathedError),
-    /// Indicates that the tracing subscriber could not be installed.
-    #[error("failed to install tracing subscriber")]
-    InstallTracing {
-        /// Contains the subscriber installation error.
-        #[source]
-        source: tracing::dispatcher::SetGlobalDefaultError,
-    },
     /// Indicates that a completed log directory could not be removed.
     #[error("failed to remove log directory")]
     RemoveDirectory(#[source] PathedError),

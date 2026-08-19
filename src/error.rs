@@ -45,6 +45,13 @@ pub(crate) enum Error {
     /// Indicates that a logging operation failed.
     #[error(transparent)]
     Log(LogError),
+    /// Indicates that the global tracing subscriber could not be installed.
+    #[error("failed to install tracing subscriber")]
+    InstallTracing {
+        /// Contains the subscriber installation error.
+        #[source]
+        source: tracing::dispatcher::SetGlobalDefaultError,
+    },
     /// Indicates that an inventory operation failed.
     #[error(transparent)]
     Inventory(InventoryError),

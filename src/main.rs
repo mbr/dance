@@ -103,7 +103,7 @@ async fn main() -> ExitCode {
             .with_writer(writer)
             .finish();
         if let Err(source) = tracing::subscriber::set_global_default(subscriber) {
-            let error = Error::Log(logs::LogError::InstallTracing { source });
+            let error = Error::InstallTracing { source };
             let error_message = error.display_full().to_string();
             return report(
                 Err(error),
