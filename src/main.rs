@@ -3,6 +3,7 @@
 mod cli;
 mod deployment;
 mod error;
+mod git;
 mod inventory;
 mod lock;
 mod logs;
@@ -40,6 +41,7 @@ async fn run(cli: Cli, processes: &ProcessContext<'_>) -> Result<(), Error> {
                 .map_err(Error::Inventory)?;
             let options = deployment::DeployOptions {
                 update_flakes: args.workflow.update,
+                commit_flakes: args.commit,
                 approved: args.yes,
                 activation: deployment::ActivationOptions {
                     include_verifier: !args.skip_verifier,

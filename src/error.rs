@@ -65,6 +65,32 @@ pub(crate) enum Error {
         /// Identifies the system observed under the deployment lease.
         active: StorePath,
     },
+    /// Indicates that automatic commits require a tracked lock file.
+    #[error("flake lock `{}` is not tracked by Git", path.display())]
+    UntrackedFlakeLock {
+        /// Identifies the untracked lock file.
+        path: PathBuf,
+    },
+    /// Indicates that automatic commits require clean flake metadata.
+    #[error("flake `{}` has changes before update: {status}", path.display())]
+    DirtyFlake {
+        /// Identifies the flake directory.
+        path: PathBuf,
+        /// Describes changes to the flake definition or lock.
+        status: String,
+    },
+    /// Indicates that a repository advanced during deployment.
+    #[error("Git repository `{}` changed during deployment", path.display())]
+    RepositoryChanged {
+        /// Identifies the repository root.
+        path: PathBuf,
+    },
+    /// Indicates that an updated lock changed during deployment.
+    #[error("updated flake lock `{}` changed during deployment", path.display())]
+    UpdatedFlakeLockChanged {
+        /// Identifies the changed lock file.
+        path: PathBuf,
+    },
     /// Indicates that flake metadata was malformed.
     #[error("failed to parse metadata for flake `{}`", path.display())]
     ParseFlakeMetadata {

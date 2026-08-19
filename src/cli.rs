@@ -73,6 +73,9 @@ pub(crate) struct DeployArgs {
     /// Configures the hosts and inputs to review.
     #[command(flatten)]
     pub(crate) workflow: WorkflowArgs,
+    /// Commits changed flake locks after a successful deployment.
+    #[arg(short, long, requires = "update")]
+    pub(crate) commit: bool,
     /// Deploys without requesting confirmation.
     #[arg(short, long)]
     pub(crate) yes: bool,
@@ -88,4 +91,20 @@ pub(crate) struct DeployArgs {
     /// Skips post-deployment garbage collection.
     #[arg(short = 'G', long, conflicts_with = "keep_generations")]
     pub(crate) no_gc: bool,
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::{Cli, Command};
+
+    /// Checks that lock commits cannot be requested without updating inputs.
+    #[test]
+    fn committing_requires_an_update() {
+        assert!(Cli::try_parse_from(["dance", "deploy", "--commit"]).is_err());
+        let cli = Cli::try_parse_from(["dance", "deploy", "--update", "--commit"])
+            .expect("commit with update should parse");
+        assert!(matches!(cli.command, Command::Deploy(args) if args.commit));
+    }
 }
