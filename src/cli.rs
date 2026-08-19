@@ -76,6 +76,9 @@ pub(crate) struct DeployArgs {
     /// Commits changed flake locks after a successful deployment.
     #[arg(short, long, requires = "update")]
     pub(crate) commit: bool,
+    /// Updates flakes and commits changed locks after successful deployment.
+    #[arg(short = 'g', long, conflicts_with_all = ["update", "commit"])]
+    pub(crate) git: bool,
     /// Deploys without requesting confirmation.
     #[arg(short, long)]
     pub(crate) yes: bool,
@@ -93,6 +96,18 @@ pub(crate) struct DeployArgs {
     pub(crate) no_gc: bool,
 }
 
+impl DeployArgs {
+    /// Returns whether selected flakes should be updated.
+    pub(crate) fn update_flakes(&self) -> bool {
+        self.workflow.update || self.git
+    }
+
+    /// Returns whether changed lock files should be committed.
+    pub(crate) fn commit_flakes(&self) -> bool {
+        self.commit || self.git
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use clap::Parser;
@@ -106,5 +121,19 @@ mod tests {
         let cli = Cli::try_parse_from(["dance", "deploy", "--update", "--commit"])
             .expect("commit with update should parse");
         assert!(matches!(cli.command, Command::Deploy(args) if args.commit));
+    }
+
+    /// Checks the combined Git update shorthand and its explicit-option conflicts.
+    #[test]
+    fn git_enables_update_and_commit() {
+        let cli =
+            Cli::try_parse_from(["dance", "deploy", "--git"]).expect("Git shorthand should parse");
+        let Command::Deploy(args) = cli.command else {
+            panic!("deploy command should parse");
+        };
+        assert!(args.update_flakes());
+        assert!(args.commit_flakes());
+        assert!(Cli::try_parse_from(["dance", "deploy", "--git", "--update"]).is_err());
+        assert!(Cli::try_parse_from(["dance", "deploy", "--git", "--commit"]).is_err());
     }
 }

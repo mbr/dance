@@ -47,6 +47,7 @@ dance deploy
 dance deploy www                   # Deploy only the www inventory entry
 dance deploy --update www          # Update its flake before deploying
 dance deploy --update --commit www # Commit the lock after successful deployment
+dance deploy --git www             # Shorthand for --update --commit
 ```
 
 Dance asks for confirmation, temporarily activates each system with `nixos-rebuild test`, builds and runs its verifier, then makes a successful test persistent with `nixos-rebuild switch`. A failed test or verifier causes Dance to reactivate the system observed during review. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
@@ -61,7 +62,7 @@ nixos-rebuild switch --use-substitutes --flake ../production#web-server --target
 
 After a verified deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup.
 
-With `--update --commit`, Dance requires `flake.nix` and the tracked `flake.lock` to be clean before updating. After every selected host deploys successfully, changed locks are committed as `Update flake inputs`. The commit contains only those lock files and preserves unrelated staged changes.
+With `--update --commit`, or its `--git` shorthand, Dance requires `flake.nix` and the tracked `flake.lock` to be clean before updating. After every selected host deploys successfully, changed locks are committed as `Update flake inputs`. The commit contains only those lock files and preserves unrelated staged changes.
 
 ## Safety
 
