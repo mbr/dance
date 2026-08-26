@@ -18,9 +18,9 @@ Dance keeps the complete `nixos-rebuild` operations and adds:
 - **Parallel execution** of all selected deployments.
 - Status queries: evaluate the desired system locally, then check if the remote needs to be updated.
 - **Rollback** including watchdog timers: if you lock yourself out of SSH, wait 6 minutes for it to revert automatically.
-- **Deployment locks** to prevent accidental parallel Dance deployments.
+- **Deployment locks** prevent concurrent deployments to the same host.
 - **Verification** of deployments: write a script to smoke-test a server, with automatic rollbacks on failure.
-- **No local state**! `dance` does not rely on any mutable state, just immutable inventory. If your `flake.lock` is version controlled, you can run it on any machine without having to ensure any sort of deployment state is checked in.
+- **No deployment state**: the active state comes from `/run/current-system`; the desired state comes from the flake. With a version-controlled `flake.lock` and inventory, Dance can run from any machine.
 
 ## Writing an inventory file
 
@@ -58,9 +58,9 @@ These steps run for all servers in parallel.
 
 ## Deploying servers
 
-Using `deploy` instead of `status` will perform everything `status` does and then offer a confirmation prompt. If you answer `y` there (or pass `--yes`), `dance` will, for each server:
+Using `deploy` instead of `status` performs the same active-versus-desired comparison without verifying the old system, then offers a confirmation prompt. If you answer `y` there (or pass `--yes`), `dance` will, for each outdated server:
 
-1. Acquire a deployment lock to prevent multiple Dance runs from conflicting.
+1. Acquire a per-host deployment lock to prevent another Dance run from deploying to that host.
 2. Build and upload the desired system with `nixos-rebuild dry-activate`.
 3. Arm a rollback watchdog and temporarily activate the system with `nixos-rebuild test`. Note that `test` is a bit of a misnomer; this activates the system except for updating the boot loader.
 4. Run the configured verifier against the system.
@@ -68,7 +68,7 @@ Using `deploy` instead of `status` will perform everything `status` does and the
 6. Disarm the watchdog.
 7. Garbage collect down to a configurable number of kept generations.
 
-A failed activation or verifier immediately restores the previous system. If Dance exits or loses contact first, the watchdog performs the same restoration when its deadline expires.
+A failed activation or verifier immediately restores the system observed during review. If Dance exits or loses contact first, the watchdog performs the same restoration when its deadline expires.
 
 ## Updating flake inputs
 
@@ -115,6 +115,6 @@ dance verify www
 
 Dance keeps command output under `$XDG_STATE_HOME/dance/logs` when a run fails, falling back to `~/.local/state/dance/logs` when `XDG_STATE_HOME` is unset. Each retained run contains a `run.log` tracing log and numbered raw output streams for its commands.
 
-## LLM friendliness
+## Automation-friendly output
 
-`dance` is pretty to look at with status bars, but it also makes outcomes and potential problems easy to discover. When not run in a terminal, it reports successes and failures sparsely and provides paths to retained logs.
+Dance uses live per-host progress in a terminal and concise summaries otherwise. Failures point to retained command logs, making runs easy to inspect from scripts and coding agents.
