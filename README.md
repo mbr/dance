@@ -53,7 +53,7 @@ dance deploy --git www             # Shorthand for --update --commit
 
 Dance asks for confirmation and then deploys each reviewed server independently. Each server is locked and revalidated before Dance builds its verifier and warms the deployment with `nixos-rebuild dry-activate`. Dance then arms a six-minute target-side rollback watchdog, temporarily activates the system with `nixos-rebuild test`, runs the verifier, and makes a successful test persistent with `nixos-rebuild switch`. A failure on one server does not prevent unrelated servers from deploying.
 
-A failed test or verifier triggers immediate restoration of the system observed during review. If Dance exits or loses contact after arming the watchdog, the target attempts the same restoration when the deadline expires. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If rollback cannot be confirmed, inspect the machine and use its console if necessary.
+A failed test or verifier triggers immediate restoration of the system observed during review. If Dance exits or loses contact after arming the watchdog, the target attempts the same restoration when the deadline expires. Restoration waits for a disconnected activation process to release NixOS's activation lock. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If rollback cannot be confirmed, inspect the machine and use its console if necessary.
 
 A deployment centers on these complete rebuild commands:
 

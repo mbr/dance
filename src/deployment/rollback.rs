@@ -99,10 +99,10 @@ impl Watchdog {
                 active,
             });
         }
-        self.disarm(host, processes, progress).await
+        self.cleanup(host, processes, progress).await
     }
 
-    /// Disarms a target-side watchdog after a conclusive outcome.
+    /// Disarms a target-side watchdog that has not started restoration.
     pub(super) async fn disarm(
         &self,
         host: &Host,
@@ -115,7 +115,32 @@ impl Watchdog {
             processes,
             progress,
         )
-        .argument(format!("systemctl stop {}.timer", shell_quote(&self.unit)))
+        .argument(format!(
+            "systemctl stop {unit}.timer && state=$(systemctl show --property=ActiveState --value {unit}.service 2>/dev/null || true); [ -z \"$state\" ] || [ \"$state\" = inactive ]",
+            unit = shell_quote(&self.unit),
+        ))
+        .timeout(SSH_TIMEOUT)
+        .status()
+        .await
+    }
+
+    /// Removes a watchdog after confirmed restoration.
+    async fn cleanup(
+        &self,
+        host: &Host,
+        processes: &ProcessContext<'_>,
+        progress: &ProgressBar,
+    ) -> Result<(), Error> {
+        operations::ssh(
+            host,
+            format!("deploy-{}-cleanup-rollback", host.id()),
+            processes,
+            progress,
+        )
+        .argument(format!(
+            "systemctl stop {unit}.timer {unit}.service 2>/dev/null || true; ! systemctl is-active --quiet {unit}.timer {unit}.service",
+            unit = shell_quote(&self.unit),
+        ))
         .timeout(SSH_TIMEOUT)
         .status()
         .await
@@ -127,21 +152,27 @@ fn arm_command(unit: &str, previous: &StorePath) -> String {
     let timeout = WATCHDOG_TIMEOUT.as_secs();
     let rollback = rollback_command(previous);
     format!(
-        "systemd-run --quiet --collect --unit={} --on-active={timeout}s --timer-property=AccuracySec=1s --property=Type=oneshot -- /bin/sh -c {}",
+        "systemd-run --quiet --unit={} --on-active={timeout}s --timer-property=AccuracySec=1s --property=Type=oneshot --property=RemainAfterExit=yes -- /bin/sh -c {}",
         shell_quote(unit),
         shell_quote(&rollback),
     )
 }
 
 /// Builds the command that restores a reviewed system persistently.
+///
+/// NixOS activation returns 11 when another activation holds its lock. A
+/// disconnected `nixos-rebuild` can remain active on the target, so rollback
+/// waits out that operation rather than consuming its one watchdog attempt.
 fn rollback_command(previous: &StorePath) -> String {
     let profile = previous.as_ref().join("sw/bin/nix-env");
     let activate = previous.as_ref().join("bin/switch-to-configuration");
+    let sleep = previous.as_ref().join("sw/bin/sleep");
     format!(
-        "{} --profile /nix/var/nix/profiles/system --set {} && {} switch",
+        "{} --profile /nix/var/nix/profiles/system --set {} && while true; do {} switch; status=$?; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -ne 11 ]; then exit \"$status\"; fi; {} 1; done",
         shell_quote(&profile.to_string_lossy()),
         shell_quote(&previous.to_string()),
         shell_quote(&activate.to_string_lossy()),
+        shell_quote(&sleep.to_string_lossy()),
     )
 }
 
@@ -166,13 +197,13 @@ mod tests {
         assert_eq!(
             rollback,
             format!(
-                "'{path}/sw/bin/nix-env' --profile /nix/var/nix/profiles/system --set '{path}' && '{path}/bin/switch-to-configuration' switch"
+                "'{path}/sw/bin/nix-env' --profile /nix/var/nix/profiles/system --set '{path}' && while true; do '{path}/bin/switch-to-configuration' switch; status=$?; if [ \"$status\" -eq 0 ]; then exit 0; fi; if [ \"$status\" -ne 11 ]; then exit \"$status\"; fi; '{path}/sw/bin/sleep' 1; done"
             )
         );
         assert_eq!(
             arm_command("dance-rollback-test", &previous),
             format!(
-                "systemd-run --quiet --collect --unit='dance-rollback-test' --on-active=360s --timer-property=AccuracySec=1s --property=Type=oneshot -- /bin/sh -c {}",
+                "systemd-run --quiet --unit='dance-rollback-test' --on-active=360s --timer-property=AccuracySec=1s --property=Type=oneshot --property=RemainAfterExit=yes -- /bin/sh -c {}",
                 shell_quote(&rollback)
             )
         );
