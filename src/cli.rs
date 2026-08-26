@@ -40,18 +40,18 @@ pub(crate) struct Cli {
 /// Selects a workflow and its valid options.
 #[derive(Debug, Subcommand)]
 pub(crate) enum Command {
-    /// Compares deployed systems with their local configurations.
-    Review(WorkflowArgs),
+    /// Reports deployed systems and pending configuration changes.
+    Status(WorkflowArgs),
     /// Reviews and deploys outdated systems.
     Deploy(DeployArgs),
     /// Runs configured verifiers without deploying.
     Verify(VerifyArgs),
 }
 
-/// Configures the review phase shared by each workflow.
+/// Configures system comparison shared by status and deployment.
 #[derive(Args, Debug)]
 pub(crate) struct WorkflowArgs {
-    /// Updates selected flakes during review.
+    /// Updates selected flakes before comparing systems.
     #[arg(short, long)]
     pub(crate) update: bool,
     /// Limits the workflow to these inventory IDs.
@@ -70,7 +70,7 @@ pub(crate) struct VerifyArgs {
 /// Configures activation after the shared review phase.
 #[derive(Args, Debug)]
 pub(crate) struct DeployArgs {
-    /// Configures the hosts and inputs to review.
+    /// Configures the hosts and inputs to compare.
     #[command(flatten)]
     pub(crate) workflow: WorkflowArgs,
     /// Commits changed flake locks after a successful deployment.

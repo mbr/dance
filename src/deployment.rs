@@ -145,8 +145,8 @@ impl Display for ActivationSummary {
     }
 }
 
-/// Reviews the selected hosts without activating them.
-pub(crate) async fn review(
+/// Reports the selected hosts without activating them.
+pub(crate) async fn status(
     inventory: Inventory,
     update_flakes: bool,
     processes: &ProcessContext<'_>,
@@ -258,7 +258,7 @@ async fn collect(
         println!("{}", Table::new(rows));
     } else {
         println!(
-            "review: {up_to_date} up to date, {} out of date, {failed} failed",
+            "status: {up_to_date} up to date, {} out of date, {failed} failed",
             outdated.len()
         );
     }

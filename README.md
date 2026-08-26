@@ -5,8 +5,8 @@ A tool for deploying servers with `nixos-rebuild`. Everything you wished your pe
 At its core, Dance takes servers defined in local Nix flakes and deploys them over SSH. A flake can define one server or several related servers. A few conveniences come with that:
 
 - An inventory keeps short server IDs and SSH addresses in one place.
-- Review and deployment run in parallel across multiple servers.
-- `--update` updates the inputs of all selected flakes during review.
+- Status checks and deployments run in parallel across multiple servers.
+- `--update` updates the inputs of all selected flakes before comparison.
 - `nixos-rebuild test` builds, uploads, and temporarily activates each approved system before it becomes a boot generation.
 - Flake verifiers are built after the test activation and can check it externally or over SSH.
 - Verified systems are made persistent with `nixos-rebuild switch`; failed tests or verifiers trigger a best-effort live rollback.
@@ -30,14 +30,14 @@ flake_name = "web-server"
 Running
 
 ```console
-dance review
+dance status
 ```
 
-compares the active system on `www.example.com` with the system defined locally. Pass one or more inventory IDs to limit the review:
+compares the active system on `www.example.com` with the system defined locally. Pass one or more inventory IDs to limit the status check:
 
 ```console
-dance review www
-dance review --update www # Update the production flake during review
+dance status www
+dance status --update www # Update the production flake before comparison
 ```
 
 To deploy outdated systems, run:

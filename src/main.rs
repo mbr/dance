@@ -32,9 +32,9 @@ use crate::{
 async fn run(cli: Cli, processes: &ProcessContext<'_>) -> Result<(), Error> {
     let inventory = Inventory::load(&cli.inventory).map_err(Error::Inventory)?;
     match cli.command {
-        Command::Review(args) => {
+        Command::Status(args) => {
             let inventory = inventory.select(&args.ids).map_err(Error::Inventory)?;
-            deployment::review(inventory, args.update, processes).await
+            deployment::status(inventory, args.update, processes).await
         }
         Command::Deploy(args) => {
             let inventory = inventory
