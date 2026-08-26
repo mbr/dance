@@ -42,7 +42,7 @@ else {
 }
 "#;
 
-/// Describes a runnable verifier evaluated from a flake.
+/// Describes a verifier evaluated from a flake but not necessarily built.
 struct Verifier {
     /// Identifies the verifier's unrealized output path.
     output: StorePath,
@@ -111,8 +111,31 @@ impl Verifier {
         .await
     }
 
+    /// Returns the realized verifier executable.
+    fn executable(&self) -> PathBuf {
+        self.output.as_ref().join("bin").join(&self.main_program)
+    }
+}
+
+/// Owns a configured verifier whose output has been built in the local Nix store.
+pub(crate) struct PreparedVerifier(Verifier);
+
+impl PreparedVerifier {
+    /// Discovers and builds the verifier configured for one host.
+    pub(crate) async fn prepare(
+        host: &Host,
+        processes: &ProcessContext<'_>,
+        progress: &ProgressBar,
+    ) -> Result<Option<Self>, Error> {
+        let Some(verifier) = Verifier::discover(host, processes, progress).await? else {
+            return Ok(None);
+        };
+        verifier.build(host, processes, progress).await?;
+        Ok(Some(Self(verifier)))
+    }
+
     /// Runs the built verifier on the deployment machine.
-    async fn run(
+    pub(crate) async fn run(
         &self,
         host: &Host,
         processes: &ProcessContext<'_>,
@@ -121,7 +144,7 @@ impl Verifier {
         Invocation::new(
             processes,
             format!("verify-{}-run", host.id()),
-            self.executable(),
+            self.0.executable(),
             progress,
         )
         .environment("DANCE_HOST_ID", host.id())
@@ -129,11 +152,6 @@ impl Verifier {
         .timeout(TIMEOUT)
         .status()
         .await
-    }
-
-    /// Returns the realized verifier executable.
-    fn executable(&self) -> PathBuf {
-        self.output.as_ref().join("bin").join(&self.main_program)
     }
 }
 
@@ -172,12 +190,24 @@ pub(crate) async fn run_configured(
     progress: &ProgressBar,
 ) -> Result<ConfiguredOutcome, Error> {
     status::set_phase(progress, host.id(), DeploymentPhase::BuildingVerifier);
-    let Some(verifier) = Verifier::discover(host, processes, progress).await? else {
+    let Some(verifier) = PreparedVerifier::prepare(host, processes, progress).await? else {
         return Ok(ConfiguredOutcome::Missing);
     };
-    verifier.build(host, processes, progress).await?;
 
     status::set_phase(progress, host.id(), DeploymentPhase::RunningVerifier);
+    verifier.run(host, processes, progress).await?;
+    Ok(ConfiguredOutcome::Verified)
+}
+
+/// Builds and runs the configured verifier without changing a shared progress phase.
+pub(crate) async fn check_configured(
+    host: &Host,
+    processes: &ProcessContext<'_>,
+    progress: &ProgressBar,
+) -> Result<ConfiguredOutcome, Error> {
+    let Some(verifier) = PreparedVerifier::prepare(host, processes, progress).await? else {
+        return Ok(ConfiguredOutcome::Missing);
+    };
     verifier.run(host, processes, progress).await?;
     Ok(ConfiguredOutcome::Verified)
 }

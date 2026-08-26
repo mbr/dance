@@ -8,7 +8,13 @@ use std::{
 use indicatif::ProgressBar;
 
 use super::operations;
-use crate::{error::Error, inventory::Host, process::ProcessContext, store_path::StorePath};
+use crate::{
+    error::Error,
+    inventory::Host,
+    process::ProcessContext,
+    store_path::StorePath,
+    verification::{self, ConfiguredOutcome},
+};
 
 /// Describes a host's state during deployment review.
 #[derive(Clone, Copy)]
@@ -31,6 +37,29 @@ impl Display for HostStatus {
     }
 }
 
+/// Describes whether a host passed its configured verifier.
+#[derive(Clone, Copy)]
+pub(super) enum Validity {
+    /// The verifier passed.
+    Valid,
+    /// The host has no configured verifier.
+    Missing,
+    /// Verifier discovery, building, or execution failed.
+    Failed,
+    /// Verification was not requested for this table.
+    Unchecked,
+}
+
+impl Display for Validity {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Valid => "yes",
+            Self::Missing | Self::Unchecked => "-",
+            Self::Failed => "failed",
+        })
+    }
+}
+
 /// Provides a row in the deployment status table.
 #[derive(tabled::Tabled)]
 pub(super) struct HostRow {
@@ -43,6 +72,9 @@ pub(super) struct HostRow {
     /// Summarizes the review result.
     #[tabled(rename = "STATUS")]
     status: HostStatus,
+    /// Reports the configured verifier result.
+    #[tabled(rename = "VALID")]
+    valid: Validity,
     /// Displays the store-path transition when deployment is needed.
     #[tabled(rename = "CHANGE")]
     change: String,
@@ -50,17 +82,18 @@ pub(super) struct HostRow {
 
 impl HostRow {
     /// Creates a row for a host whose state could not be collected.
-    pub(super) fn failed(host: &Host) -> Self {
+    pub(super) fn failed(host: &Host, valid: Validity) -> Self {
         Self {
             id: host.id().to_owned(),
             flake: host.display_flake(),
             status: HostStatus::Failed,
+            valid,
             change: "-".to_owned(),
         }
     }
 
     /// Creates a row from the deployed and desired systems.
-    fn collected(host: &Host, deployed: &StorePath, expected: &StorePath) -> Self {
+    fn collected(host: &Host, deployed: &StorePath, expected: &StorePath, valid: Validity) -> Self {
         let up_to_date = deployed == expected;
         Self {
             id: host.id().to_owned(),
@@ -70,6 +103,7 @@ impl HostRow {
             } else {
                 HostStatus::OutOfDate
             },
+            valid,
             change: if up_to_date {
                 "-".to_owned()
             } else {
@@ -155,15 +189,41 @@ pub(super) async fn expected(
     .await
 }
 
+/// Checks the currently deployed host with its configured verifier.
+pub(super) async fn validity(
+    host: &Host,
+    processes: &ProcessContext<'_>,
+    progress: &ProgressBar,
+) -> Result<ConfiguredOutcome, Error> {
+    collect_step(
+        progress,
+        host.id(),
+        "validation",
+        verification::check_configured(host, processes, progress),
+    )
+    .await
+}
+
 /// Completes the local collection step after a flake update failure.
 pub(super) fn skip_expected(host: &Host, progress: &ProgressBar) {
     progress.set_message(format!("{}: local info skipped", host.id()));
     progress.inc(1);
 }
 
+/// Completes the validation step after a flake update failure.
+pub(super) fn skip_validity(host: &Host, progress: &ProgressBar) {
+    progress.set_message(format!("{}: validation skipped", host.id()));
+    progress.inc(1);
+}
+
 /// Compares the deployed and expected systems for one host.
-pub(super) fn review(host: Host, deployed: StorePath, expected: &StorePath) -> ReviewOutcome {
-    let row = HostRow::collected(&host, &deployed, expected);
+pub(super) fn review(
+    host: Host,
+    deployed: StorePath,
+    expected: &StorePath,
+    valid: Validity,
+) -> ReviewOutcome {
+    let row = HostRow::collected(&host, &deployed, expected, valid);
 
     if &deployed == expected {
         return ReviewOutcome::UpToDate(row);

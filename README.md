@@ -33,7 +33,7 @@ Running
 dance status
 ```
 
-compares the active system on `www.example.com` with the system defined locally. Pass one or more inventory IDs to limit the status check:
+compares the active system on `www.example.com` with the system defined locally and runs its configured verifier. The `VALID` column reports `yes`, `-` when no verifier is configured, or `failed`. Pass one or more inventory IDs to limit the status check:
 
 ```console
 dance status www

@@ -75,9 +75,13 @@ fn spinner_style(template: &str) -> Result<ProgressStyle, Error> {
 }
 
 /// Creates a progress bar for host review steps.
-pub(crate) fn review(host_count: usize, update: bool) -> Result<ProgressBar, Error> {
+pub(crate) fn review(
+    host_count: usize,
+    update: bool,
+    validate: bool,
+) -> Result<ProgressBar, Error> {
     let host_count = u64::try_from(host_count).expect("host count should fit in u64");
-    let steps_per_host = if update { 3 } else { 2 };
+    let steps_per_host = 2 + u64::from(update) + u64::from(validate);
     let length = host_count
         .checked_mul(steps_per_host)
         .expect("review step count should fit in u64");
