@@ -174,18 +174,22 @@ pub(crate) async fn deploy(
         processes,
     )
     .await?;
-    if let Some(error) = first_error {
-        return Err(error);
-    }
     if outdated.is_empty() {
-        return pending_updates.commit(processes).await;
+        return match first_error {
+            Some(error) => Err(error),
+            None => pending_updates.commit(processes).await,
+        };
     }
 
     if !options.approved && !confirm()? {
-        return Ok(());
+        return first_error.map_or(Ok(()), Err);
     }
 
-    activate_hosts(outdated, options.activation, processes).await?;
+    let deployment = activate_hosts(outdated, options.activation, processes).await;
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    deployment?;
     pending_updates.commit(processes).await
 }
 
