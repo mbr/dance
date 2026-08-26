@@ -8,6 +8,8 @@ use std::{
 
 use thiserror::Error;
 
+/// Locates the Nix store used by managed NixOS systems.
+const NIX_STORE: &str = "/nix/store";
 /// Defines the alphabet used by Nix store hashes.
 const NIX_BASE32: &str = "0123456789abcdfghijklmnpqrsvwxyz";
 /// Limits hashes to a recognizable table-friendly prefix.
@@ -48,7 +50,7 @@ impl FromStr for StorePath {
             .split_once('-')
             .ok_or_else(|| StorePathError(value.to_owned()))?;
 
-        if !path.is_absolute()
+        if path.parent() != Some(Path::new(NIX_STORE))
             || store_name.is_empty()
             || hash.len() != 32
             || !hash.chars().all(|character| NIX_BASE32.contains(character))
@@ -98,6 +100,11 @@ mod tests {
         assert_eq!(store_path.short_hash(), "00000000");
         assert_eq!(store_path.as_ref(), PathBuf::from(path));
         assert!("relative-store-path".parse::<StorePath>().is_err());
+        assert!(
+            "/tmp/00000000000000000000000000000000-system"
+                .parse::<StorePath>()
+                .is_err()
+        );
         assert!(
             "/nix/store/not-a-nix-hash-name"
                 .parse::<StorePath>()
