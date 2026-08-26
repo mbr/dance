@@ -75,6 +75,7 @@ pub(crate) async fn flakes(
     commit: bool,
     processes: &ProcessContext<'_>,
 ) -> UpdateOutcome {
+    let mut outcome = UpdateOutcome::default();
     let updates = if commit {
         let prepared = join_all(flakes.into_iter().map(|(path, progresses)| async move {
             let progress = progresses
@@ -84,28 +85,18 @@ pub(crate) async fn flakes(
             (path, progresses, repository)
         }))
         .await;
-        if prepared
-            .iter()
-            .any(|(_, _, repository)| repository.is_err())
-        {
-            let mut outcome = UpdateOutcome::default();
-            for (path, progresses, repository) in prepared {
-                if let Err(error) = repository {
-                    outcome.first_error.get_or_insert(error);
-                }
-                for progress in progresses {
-                    progress.set_message("update preflight failed");
-                }
-                outcome.failed.insert(path);
-            }
-            return outcome;
-        }
         prepared
             .into_iter()
-            .filter_map(|(path, progresses, repository)| {
-                repository
-                    .ok()
-                    .map(|repository| (path, progresses, Some(repository)))
+            .filter_map(|(path, progresses, repository)| match repository {
+                Ok(repository) => Some((path, progresses, Some(repository))),
+                Err(error) => {
+                    for progress in progresses {
+                        progress.set_message("update preflight failed");
+                    }
+                    outcome.failed.insert(path);
+                    outcome.first_error.get_or_insert(error);
+                    None
+                }
             })
             .collect::<Vec<_>>()
     } else {
@@ -120,7 +111,6 @@ pub(crate) async fn flakes(
             .map(|(path, progresses, repository)| flake(path, progresses, repository, processes)),
     )
     .await;
-    let mut outcome = UpdateOutcome::default();
 
     for (path, result) in results {
         match result {
