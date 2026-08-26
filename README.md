@@ -44,25 +44,25 @@ Pass the file using `-i/--inventory` or set `DANCE_INVENTORY` instead.
 The `status` command can be used to query the status quo:
 
 ```console
-$ dance -i invenstory.toml status
+$ dance -i inventory.toml status
 ```
 
-will query every host, which performs the following steps:
+This queries every host and performs the following steps:
 
 1. Read each host's active system from `/run/current-system` via SSH.
-2. Evaluate the desired system store path from `flake_path#flake_name` out inventory.
+2. Evaluate the desired system store path from `flake_path#flake_name` in the inventory.
 3. Run a verifier against the system (see "verifiers" below).
 4. Report whether the system needs to be updated.
 
-This is run for all servers in parallel.
+These steps run for all servers in parallel.
 
 ## Deploying servers
 
-Using `deploy` instead of `status` will perform everything `status` does and then offer a confirmation prompt. If you answer `y` there (or passed `--yes`), `dance` will, for each server:
+Using `deploy` instead of `status` will perform everything `status` does and then offer a confirmation prompt. If you answer `y` there (or pass `--yes`), `dance` will, for each server:
 
-1. Acquire a deployment lock, to prevent multiple dance runs conflicting.
+1. Acquire a deployment lock to prevent multiple Dance runs from conflicting.
 2. Build and upload the desired system with `nixos-rebuild dry-activate`.
-3. Arm a rollback watchdog and temporarily activate the system with `nixos-rebuild test`. Note that `test` is a bit of misnomer, this activates the system except for updating the boot loader.
+3. Arm a rollback watchdog and temporarily activate the system with `nixos-rebuild test`. Note that `test` is a bit of a misnomer; this activates the system except for updating the boot loader.
 4. Run the configured verifier against the system.
 5. Persist the system with `nixos-rebuild switch`.
 6. Disarm the watchdog.
@@ -117,4 +117,4 @@ Dance keeps command output under `$XDG_STATE_HOME/dance/logs` when a run fails, 
 
 ## LLM friendliness
 
-`dance` is pretty to look at with statusbars, but has also been optimized to make outcomes and potential problems easily discoverable, it will output sucess and failures sparsely when not run in a terminal, and provide paths where logs can be found.
+`dance` is pretty to look at with status bars, but it also makes outcomes and potential problems easy to discover. When not run in a terminal, it reports successes and failures sparsely and provides paths to retained logs.
