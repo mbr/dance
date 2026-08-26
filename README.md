@@ -70,7 +70,7 @@ Editing `flake.nix`, `flake.lock`, or other flake source files while Dance is ru
 
 Before activation, Dance acquires `/run/lock/dance-deployment.lock` through SSH and verifies that the reviewed system is still active. A deployment fails rather than waiting when another Dance process holds the host lock. The lock is advisory and does not prevent manual `nixos-rebuild` commands.
 
-Targets must be reachable over SSH, and deployments should have an out-of-band reboot path such as a hosting console.
+Targets must be reachable through noninteractive SSH authentication. Dance disables password prompts and uses connection timeouts and keepalives for its SSH and `nixos-rebuild` operations. Deployments should have an out-of-band reboot path such as a hosting console.
 
 ## Verification
 

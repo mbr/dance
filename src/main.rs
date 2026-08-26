@@ -8,6 +8,7 @@ mod inventory;
 mod lock;
 mod logs;
 mod process;
+mod ssh;
 mod status;
 mod store_path;
 mod update;

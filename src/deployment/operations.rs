@@ -8,6 +8,7 @@ use crate::{
     error::Error,
     inventory::Host,
     process::{Invocation, ProcessContext},
+    ssh,
     store_path::StorePath,
 };
 
@@ -21,7 +22,9 @@ pub(super) fn ssh<'a>(
     processes: &'a ProcessContext<'a>,
     progress: &'a ProgressBar,
 ) -> Invocation<'a> {
-    Invocation::new(processes, label, "ssh", progress).argument(host.ssh_url())
+    Invocation::new(processes, label, "ssh", progress)
+        .arguments(ssh::ARGUMENTS)
+        .argument(host.ssh_url())
 }
 
 /// Reads the system currently activated on a target.
@@ -100,6 +103,7 @@ async fn rebuild(
     .argument(host.flake())
     .argument("--target-host")
     .argument(host.ssh_url())
+    .environment("NIX_SSHOPTS", ssh::nix_options())
     .status()
     .await
 }

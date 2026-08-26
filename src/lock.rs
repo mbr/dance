@@ -13,6 +13,8 @@ use tokio::{
     task::JoinHandle,
 };
 
+use crate::ssh;
+
 /// Identifies successful lease acquisition on standard output.
 const ACQUIRED: &[u8] = b"dance-lock-acquired\n";
 /// Limits SSH connection and lease acquisition.
@@ -131,14 +133,7 @@ impl DeploymentLease {
     pub(crate) async fn acquire(host: &str, ssh_target: &str) -> Result<Self, LockError> {
         let mut command = Command::new("ssh");
         command
-            .args([
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "ServerAliveInterval=15",
-                "-o",
-                "ServerAliveCountMax=2",
-            ])
+            .args(ssh::ARGUMENTS)
             .arg(ssh_target)
             .arg(REMOTE_COMMAND);
         Self::spawn(host, command).await
