@@ -138,11 +138,12 @@ async fn fail(
     }
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::RollingBack);
+    let recovery_processes = processes.recovery();
     match rollback::restore(
         &reviewed.host,
         &reviewed.deployed,
         persistence,
-        processes,
+        &recovery_processes,
         progress,
     )
     .await

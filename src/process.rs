@@ -133,6 +133,14 @@ impl<'a> ProcessContext<'a> {
         }
     }
 
+    /// Creates subprocess services isolated from workflow cancellation for bounded recovery.
+    pub(crate) fn recovery(&self) -> Self {
+        Self {
+            logs: self.logs,
+            cancellation: CancellationToken::new(),
+        }
+    }
+
     /// Cancels commands using this context without cancelling its parent.
     pub(crate) fn cancel(&self) {
         self.cancellation.cancel();
@@ -459,7 +467,13 @@ mod tests {
             interrupted,
             Err(Error::Process(ProcessError::Interrupted { .. }))
         ));
-        drop((timeout_context, interrupted_context));
+
+        let recovery_context = interrupted_context.recovery();
+        Invocation::new(&recovery_context, "recovery", "true", &progress)
+            .status()
+            .await
+            .expect("recovery command should ignore prior cancellation");
+        drop((timeout_context, interrupted_context, recovery_context));
         logs.finish(Some("timed out or interrupted"))
             .expect("disabled logs should finish");
     }
