@@ -5,8 +5,8 @@
 //! [`OutputConsumers::attach`] once, before sealing output replay. The resulting consumers perform
 //! three jobs for each stream:
 //!
-//! - retain the exact bytes for the eventual command result or error;
-//! - copy the bytes to the command's persistent [`LogFile`], when logging is enabled;
+//! - retain requested stdout and a bounded stderr suffix for the eventual result or error;
+//! - copy every byte to the command's persistent [`LogFile`], when logging is enabled;
 //! - extract recent human-readable text for the command's progress bar.
 //!
 //! While the child runs, `Invocation` polls [`OutputConsumers::refresh_interval`] alongside process
@@ -15,8 +15,8 @@
 //!
 //! Once the child has exited or been terminated, `Invocation` consumes the collectors through
 //! [`OutputConsumers::finish`]. That method waits for both pipes to reach EOF, reports delayed
-//! stream or log failures, performs one final progress refresh, and returns stdout and stderr
-//! separately. Draining has a timeout because descendant processes can inherit the pipe handles and
+//! stream or log failures, performs one final progress refresh, and returns the retained stdout and
+//! stderr separately. Draining has a timeout because descendant processes can inherit the pipe handles and
 //! keep them open after the direct child exits. Normal application code uses
 //! [`Invocation`](super::Invocation) rather than this module directly.
 
@@ -42,11 +42,13 @@ use crate::{
 const OUTPUT_REFRESH_INTERVAL: Duration = Duration::from_millis(100);
 /// Limits output draining after the child process exits.
 const OUTPUT_EOF_TIMEOUT: Duration = Duration::from_secs(3);
+/// Bounds standard error retained for terminal failure diagnostics.
+const ERROR_CAPTURE_BYTES: usize = 64 * 1024;
 
-/// Contains the exact output bytes returned after both stream consumers reach EOF.
+/// Contains output retained after both stream consumers reach EOF.
 ///
-/// Stream ordering is preserved within stdout and stderr, but ordering between the two independent
-/// streams is intentionally not reconstructed.
+/// Requested stdout is complete, while stderr is a bounded suffix used for failure diagnostics.
+/// Ordering between the two independent streams is intentionally not reconstructed.
 pub(super) struct CapturedOutput {
     /// Contains standard output bytes.
     pub(super) stdout: Vec<u8>,
@@ -54,13 +56,61 @@ pub(super) struct CapturedOutput {
     pub(super) stderr: Vec<u8>,
 }
 
+/// Selects how much subprocess output is retained in memory.
+enum CaptureBuffer {
+    /// Discards bytes after logging and progress inspection.
+    Discard,
+    /// Retains complete output for a successful command result.
+    All(Vec<u8>),
+    /// Retains only the trailing bytes needed for failure diagnostics.
+    Tail {
+        /// Contains the currently retained suffix.
+        bytes: Vec<u8>,
+        /// Limits the retained suffix.
+        capacity: usize,
+    },
+}
+
+impl CaptureBuffer {
+    /// Appends output according to the configured retention policy.
+    fn extend(&mut self, input: &[u8]) {
+        match self {
+            Self::Discard => {}
+            Self::All(bytes) => bytes.extend_from_slice(input),
+            Self::Tail { bytes, capacity } => {
+                if input.len() >= *capacity {
+                    bytes.clear();
+                    bytes.extend_from_slice(&input[input.len() - *capacity..]);
+                    return;
+                }
+                let overflow = bytes
+                    .len()
+                    .saturating_add(input.len())
+                    .saturating_sub(*capacity);
+                if overflow != 0 {
+                    bytes.drain(..overflow);
+                }
+                bytes.extend_from_slice(input);
+            }
+        }
+    }
+
+    /// Returns the retained bytes.
+    fn into_bytes(self) -> Vec<u8> {
+        match self {
+            Self::Discard => Vec::new(),
+            Self::All(bytes) | Self::Tail { bytes, .. } => bytes,
+        }
+    }
+}
+
 /// Visits chunks from one subprocess stream without allowing logging failures to stop drainage.
 ///
 /// A write failure is retained and returned at EOF. Continuing to consume chunks prevents the child
 /// from blocking indefinitely against a full output pipe while its error is being handled.
 struct Capture {
-    /// Retains output for command results and errors.
-    bytes: Vec<u8>,
+    /// Retains output required for command results or errors.
+    buffer: CaptureBuffer,
     /// Writes output to persistent diagnostics when enabled.
     log: Option<LogFile>,
     /// Retains the first diagnostic write failure.
@@ -75,7 +125,7 @@ impl StreamVisitor for Capture {
     /// Processes one raw output chunk.
     fn on_chunk(&mut self, chunk: Chunk) -> Next {
         let bytes = chunk.as_ref();
-        self.bytes.extend_from_slice(bytes);
+        self.buffer.extend(bytes);
         if self.error.is_none()
             && let Some(log) = &mut self.log
             && let Err(error) = log.write(bytes)
@@ -93,7 +143,7 @@ impl StreamVisitor for Capture {
 
     /// Returns captured bytes or the diagnostic write failure.
     fn into_output(self) -> Self::Output {
-        self.error.map_or(Ok(self.bytes), Err)
+        self.error.map_or(Ok(self.buffer.into_bytes()), Err)
     }
 }
 
@@ -121,6 +171,7 @@ impl OutputConsumers {
         stdout: &SingleSubscriberOutputStream<D, R>,
         stderr: &SingleSubscriberOutputStream<D, R>,
         logs: Option<OutputLogs>,
+        capture_stdout: bool,
     ) -> Self
     where
         D: Delivery,
@@ -131,9 +182,18 @@ impl OutputConsumers {
             None => (None, None),
         };
         let latest = Arc::new(Mutex::new(None));
+        let stdout_buffer = if capture_stdout {
+            CaptureBuffer::All(Vec::new())
+        } else {
+            CaptureBuffer::Discard
+        };
+        let stderr_buffer = CaptureBuffer::Tail {
+            bytes: Vec::new(),
+            capacity: ERROR_CAPTURE_BYTES,
+        };
         Self {
-            stdout: attach(stdout, stdout_log, Arc::clone(&latest)),
-            stderr: attach(stderr, stderr_log, Arc::clone(&latest)),
+            stdout: attach(stdout, stdout_log, Arc::clone(&latest), stdout_buffer),
+            stderr: attach(stderr, stderr_log, Arc::clone(&latest), stderr_buffer),
             latest,
         }
     }
@@ -156,7 +216,7 @@ impl OutputConsumers {
         refresh_progress(&self.latest, progress);
     }
 
-    /// Drains both streams after child completion and returns their exact captured bytes.
+    /// Drains both streams after child completion and returns their retained bytes.
     ///
     /// This consumes the collectors, waits for both pipes concurrently, propagates consumer and
     /// diagnostic-write errors, and performs a final progress refresh. It fails after
@@ -195,6 +255,7 @@ fn attach<D, R>(
     stream: &SingleSubscriberOutputStream<D, R>,
     log: Option<LogFile>,
     latest: Arc<Mutex<Option<String>>>,
+    buffer: CaptureBuffer,
 ) -> Consumer<Result<Vec<u8>, LogError>>
 where
     D: Delivery,
@@ -202,7 +263,7 @@ where
 {
     stream
         .consume(Capture {
-            bytes: Vec::new(),
+            buffer,
             log,
             error: None,
             latest,
@@ -239,7 +300,7 @@ fn display_message(record: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::display_message;
+    use super::{CaptureBuffer, display_message};
 
     /// Checks carriage-return and newline progress extraction.
     #[test]
@@ -249,5 +310,24 @@ mod tests {
             Some("checking".to_owned())
         );
         assert_eq!(display_message(b"\r\n"), None);
+    }
+
+    /// Checks that diagnostic output retains only its configured suffix.
+    #[test]
+    fn tail_capture_is_bounded() {
+        let mut buffer = CaptureBuffer::Tail {
+            bytes: Vec::new(),
+            capacity: 5,
+        };
+        buffer.extend(b"abc");
+        buffer.extend(b"defg");
+        assert_eq!(buffer.into_bytes(), b"cdefg");
+
+        let mut buffer = CaptureBuffer::Tail {
+            bytes: Vec::new(),
+            capacity: 3,
+        };
+        buffer.extend(b"discard-prefix");
+        assert_eq!(buffer.into_bytes(), b"fix");
     }
 }

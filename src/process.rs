@@ -254,17 +254,18 @@ impl<'a> Invocation<'a> {
 
     /// Runs the command and discards its successful standard output.
     pub(crate) async fn status(self) -> Result<(), Error> {
-        self.execute(|_output| Ok(())).await
+        self.execute(false, |_output| Ok(())).await
     }
 
     /// Runs the command and returns its successful standard output.
     pub(crate) async fn output(self) -> Result<String, Error> {
-        self.execute(String::from_utf8).await
+        self.execute(true, String::from_utf8).await
     }
 
     /// Executes the configured command and consumes successful standard output.
     async fn execute<T>(
         self,
+        capture_stdout: bool,
         consume: impl FnOnce(Vec<u8>) -> Result<T, FromUtf8Error>,
     ) -> Result<T, Error> {
         let CommandLogs {
@@ -311,7 +312,12 @@ impl<'a> Invocation<'a> {
                 );
             }
         };
-        let consumers = OutputConsumers::attach(process.stdout(), process.stderr(), output_logs);
+        let consumers = OutputConsumers::attach(
+            process.stdout(),
+            process.stderr(),
+            output_logs,
+            capture_stdout,
+        );
         process.seal_output_replay();
         let mut refresh = consumers.refresh_interval();
         let limit = self.timeout.unwrap_or(MAX_COMMAND_RUNTIME);
