@@ -98,29 +98,28 @@ impl Inventory {
     }
 
     /// Limits the inventory to explicitly requested hosts.
-    pub(crate) fn select<S: AsRef<str>>(&self, requested: &[S]) -> Result<Self, InventoryError> {
+    pub(crate) fn select<S: AsRef<str>>(mut self, requested: &[S]) -> Result<Self, InventoryError> {
         if requested.is_empty() {
-            return Ok(Self {
-                hosts: self.hosts.clone(),
-            });
+            return Ok(self);
         }
 
         let mut hosts = IndexMap::new();
         for id in requested {
             let id = id.as_ref();
-            let Some(host) = self.hosts.get(id) else {
-                return Err(InventoryError::UnknownId(id.to_owned()));
-            };
-            if hosts.insert(id.to_owned(), host.clone()).is_some() {
+            if hosts.contains_key(id) {
                 return Err(InventoryError::DuplicateSelectedId(id.to_owned()));
             }
+            let Some((id, host)) = self.hosts.shift_remove_entry(id) else {
+                return Err(InventoryError::UnknownId(id.to_owned()));
+            };
+            hosts.insert(id, host);
         }
         Ok(Self { hosts })
     }
 }
 
 /// Defines deployment metadata and connection details for a machine.
-#[derive(Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Host {
     /// Identifies the inventory entry.
