@@ -260,8 +260,7 @@ impl<'a> Invocation<'a> {
     ) -> Result<T, Error> {
         let CommandLogs {
             lifecycle: command_log,
-            stdout: stdout_log,
-            stderr: stderr_log,
+            output: output_logs,
         } = self
             .context
             .logs
@@ -303,8 +302,7 @@ impl<'a> Invocation<'a> {
                 );
             }
         };
-        let consumers =
-            OutputConsumers::attach(process.stdout(), process.stderr(), stdout_log, stderr_log);
+        let consumers = OutputConsumers::attach(process.stdout(), process.stderr(), output_logs);
         process.seal_output_replay();
         let mut refresh = consumers.refresh_interval();
         let limit = self.timeout.unwrap_or(MAX_COMMAND_RUNTIME);

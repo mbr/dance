@@ -35,7 +35,7 @@ use tokio_process_tools::{
 use super::ProcessError;
 use crate::{
     error::Error,
-    logs::{LogError, LogFile},
+    logs::{LogError, LogFile, OutputLogs},
 };
 
 /// Limits how often subprocess output changes a progress message.
@@ -114,19 +114,22 @@ pub(super) struct OutputConsumers {
 impl OutputConsumers {
     /// Attaches the sole consumer to each replayable output stream.
     ///
-    /// This must happen before the process output replay is sealed. `stdout_log` and `stderr_log`
-    /// are the optional files obtained from the corresponding command log. Calling this after
-    /// another consumer has subscribed is a programming error.
+    /// This must happen before the process output replay is sealed. `logs` contains both output
+    /// files when diagnostic logging is enabled and neither otherwise. Calling this after another
+    /// consumer has subscribed is a programming error.
     pub(super) fn attach<D, R>(
         stdout: &SingleSubscriberOutputStream<D, R>,
         stderr: &SingleSubscriberOutputStream<D, R>,
-        stdout_log: Option<LogFile>,
-        stderr_log: Option<LogFile>,
+        logs: Option<OutputLogs>,
     ) -> Self
     where
         D: Delivery,
         R: Replay,
     {
+        let (stdout_log, stderr_log) = match logs {
+            Some(OutputLogs { stdout, stderr }) => (Some(stdout), Some(stderr)),
+            None => (None, None),
+        };
         let latest = Arc::new(Mutex::new(None));
         Self {
             stdout: attach(stdout, stdout_log, Arc::clone(&latest)),

@@ -95,14 +95,20 @@ pub(crate) struct CommandLog<'a> {
     finished: bool,
 }
 
-/// Owns the lifecycle and output logs allocated for one subprocess.
+/// Owns the paired output logs allocated for one subprocess.
+pub(crate) struct OutputLogs {
+    /// Receives standard output.
+    pub(crate) stdout: LogFile,
+    /// Receives standard error.
+    pub(crate) stderr: LogFile,
+}
+
+/// Owns the lifecycle and optional output logs allocated for one subprocess.
 pub(crate) struct CommandLogs<'a> {
     /// Records command completion, failure, or interruption.
     pub(crate) lifecycle: CommandLog<'a>,
-    /// Receives standard output when diagnostic logging is enabled.
-    pub(crate) stdout: Option<LogFile>,
-    /// Receives standard error when diagnostic logging is enabled.
-    pub(crate) stderr: Option<LogFile>,
+    /// Receives subprocess output when diagnostic logging is enabled.
+    pub(crate) output: Option<OutputLogs>,
 }
 
 /// Owns the diagnostic artifacts for one Dance invocation.
@@ -192,8 +198,7 @@ impl LogSession {
                     started,
                     finished: false,
                 },
-                stdout: None,
-                stderr: None,
+                output: None,
             });
         };
         let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
@@ -220,8 +225,7 @@ impl LogSession {
                 started,
                 finished: false,
             },
-            stdout: Some(stdout),
-            stderr: Some(stderr),
+            output: Some(OutputLogs { stdout, stderr }),
         })
     }
 
@@ -356,7 +360,8 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CommandLogs, LogMode, LogSession, SUBSCRIBER_LOCK, state_directory, test_subscriber,
+        CommandLogs, LogMode, LogSession, OutputLogs, SUBSCRIBER_LOCK, state_directory,
+        test_subscriber,
     };
 
     /// Checks XDG state overrides and the home-directory fallback.
@@ -396,19 +401,18 @@ mod tests {
             logs.record_start(Path::new("inventory.toml"));
             let CommandLogs {
                 lifecycle: command,
-                mut stdout,
-                mut stderr,
+                output,
             } = logs
                 .command("review party", "ssh", &["party".into()])
                 .expect("command log should start");
+            let OutputLogs {
+                mut stdout,
+                mut stderr,
+            } = output.expect("command output logs should exist");
             stdout
-                .as_mut()
-                .expect("standard output log should exist")
                 .write(b"standard output\n")
                 .expect("standard output should be logged");
             stderr
-                .as_mut()
-                .expect("standard error log should exist")
                 .write(b"standard error\n")
                 .expect("standard error should be logged");
             let status = Command::new("true")
