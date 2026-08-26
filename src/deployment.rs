@@ -1,28 +1,28 @@
 //! Concurrent review and deployment coordination.
 
-mod activation;
+mod host;
 mod operations;
 mod review;
 mod rollback;
 
 use std::{
+    fmt::{self, Display, Formatter},
     io::{self, IsTerminal},
     num::NonZeroU32,
 };
 
 use dialoguer::{Confirm, console::style, theme::ColorfulTheme};
-use futures::future::{join_all, select_all};
+use futures::future::join_all;
 use tabled::Table;
 
 use self::{
-    activation::Summary as ActivationSummary,
+    host::{LockedHost, Outcome as HostOutcome, ValidatedHost},
     review::{HostRow, ReviewOutcome, ReviewedHost},
 };
 use crate::{
     error::Error,
     git::PendingUpdates,
     inventory::Inventory,
-    lock::DeploymentLease,
     process::ProcessContext,
     status::{self, ProgressDisplay},
     update::{self, UpdateOutcome},
@@ -60,6 +60,86 @@ struct ReviewResult {
     first_error: Option<Error>,
     /// Contains updated locks awaiting successful deployment.
     pending_updates: PendingUpdates,
+}
+
+/// Aggregates deployment outcomes for terminal output and exit status.
+#[derive(Default)]
+struct ActivationSummary {
+    /// Counts successful activations.
+    activated: usize,
+    /// Counts deployment failures left in place.
+    failed: usize,
+    /// Counts failures followed by successful restoration.
+    rolled_back: usize,
+    /// Counts hosts that need operator recovery.
+    recovery_required: usize,
+    /// Counts successful activations whose cleanup failed.
+    cleanup_failed: usize,
+    /// Counts successful activations whose lease release failed.
+    lease_release_failed: usize,
+    /// Retains the first deployment error.
+    first_error: Option<Error>,
+}
+
+impl ActivationSummary {
+    /// Adds one host outcome.
+    fn record(&mut self, outcome: HostOutcome) {
+        let error = match outcome {
+            HostOutcome::Activated => {
+                self.activated += 1;
+                return;
+            }
+            HostOutcome::Failed(error) => {
+                self.failed += 1;
+                error
+            }
+            HostOutcome::RolledBack(error) => {
+                self.rolled_back += 1;
+                error
+            }
+            HostOutcome::RecoveryRequired(error) => {
+                self.recovery_required += 1;
+                error
+            }
+            HostOutcome::CleanupFailed(error) => {
+                self.activated += 1;
+                self.cleanup_failed += 1;
+                error
+            }
+            HostOutcome::LeaseReleaseFailed(error) => {
+                self.activated += 1;
+                self.lease_release_failed += 1;
+                error
+            }
+        };
+        self.first_error.get_or_insert(error);
+    }
+
+    /// Returns the first deployment failure when present.
+    fn result(self) -> Result<(), Error> {
+        self.first_error.map_or(Ok(()), Err)
+    }
+}
+
+impl Display for ActivationSummary {
+    fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "deployment: {} activated, {} failed",
+            self.activated, self.failed
+        )?;
+        for (count, label) in [
+            (self.rolled_back, "rolled back"),
+            (self.recovery_required, "recovery required"),
+            (self.cleanup_failed, "cleanup failed"),
+            (self.lease_release_failed, "lease release failed"),
+        ] {
+            if count != 0 {
+                write!(formatter, ", {count} {label}")?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Reviews the selected hosts without activating them.
@@ -100,7 +180,7 @@ pub(crate) async fn deploy(
         return Ok(());
     }
 
-    activate(outdated, options.activation, processes).await?;
+    activate_hosts(outdated, options.activation, processes).await?;
     pending_updates.commit(processes).await
 }
 
@@ -205,141 +285,88 @@ fn confirm() -> Result<bool, Error> {
 }
 
 /// Acquires every host lease without beginning partial activation.
-async fn acquire_leases(
-    reviewed: &[ReviewedHost],
+async fn acquire_hosts(
+    reviewed: Vec<ReviewedHost>,
     progresses: &[indicatif::ProgressBar],
-) -> Result<Vec<DeploymentLease>, Error> {
+) -> Result<Vec<LockedHost>, Error> {
     let results = join_all(
         reviewed
-            .iter()
+            .into_iter()
             .zip(progresses)
-            .map(|(host, progress)| async move {
-                status::set_phase(progress, host.id(), status::DeploymentPhase::Locking);
-                DeploymentLease::acquire(host.id(), &host.host.ssh_url()).await
-            }),
+            .map(|(host, progress)| LockedHost::acquire(host, progress)),
     )
     .await;
-    let mut leases = Vec::with_capacity(results.len());
+    let mut locked = Vec::with_capacity(results.len());
     let mut first_error = None;
     for result in results {
         match result {
-            Ok(lease) => leases.push(lease),
+            Ok(host) => locked.push(host),
             Err(error) => {
-                first_error.get_or_insert(Error::Lock(error));
+                first_error.get_or_insert(error);
             }
         }
     }
     if let Some(error) = first_error {
-        release_leases(leases).await;
+        join_all(locked.into_iter().map(LockedHost::abandon)).await;
         for progress in progresses {
             status::fail(progress);
         }
         Err(error)
     } else {
-        Ok(leases)
+        Ok(locked)
     }
 }
 
-/// Releases a group of leases after work is abandoned.
-async fn release_leases(leases: Vec<DeploymentLease>) {
-    for result in join_all(leases.into_iter().map(DeploymentLease::release)).await {
-        if let Err(error) = result {
-            tracing::warn!(error = %error, "failed to release abandoned deployment lease");
-        }
-    }
-}
-
-/// Verifies that reviewed host state remains current under the leases.
-async fn revalidate(
-    reviewed: &[ReviewedHost],
+/// Revalidates every locked host before allowing any activation.
+async fn revalidate_hosts(
+    locked: Vec<LockedHost>,
     progresses: &[indicatif::ProgressBar],
-    leases: &mut [DeploymentLease],
     processes: &ProcessContext<'_>,
-) -> Result<(), Error> {
-    let active =
-        join_all(reviewed.iter().zip(progresses).map(|(host, progress)| {
-            operations::deployed_store_path(&host.host, processes, progress)
-        }));
-    let losses = leases
-        .iter_mut()
-        .map(|lease| Box::pin(lease.lost()))
-        .collect::<Vec<_>>();
-    let active = tokio::select! {
-        active = active => active,
-        (error, _, _) = select_all(losses) => return Err(Error::Lock(error)),
-    };
-    for (host, active) in reviewed.iter().zip(active) {
-        let active = active?;
-        if active != host.deployed {
-            return Err(Error::DeploymentStateChanged {
-                host: host.id().to_owned(),
-                reviewed: host.deployed.clone(),
-                active,
-            });
-        }
-    }
-    Ok(())
-}
-
-/// Activates one host while continuously monitoring and then releasing its lease.
-async fn activate_with_lease(
-    host: ReviewedHost,
-    options: ActivationOptions,
-    processes: &ProcessContext<'_>,
-    progress: &indicatif::ProgressBar,
-    mut lease: DeploymentLease,
-) -> activation::Outcome {
-    let host_processes = processes.child();
-    let deployment = activation::activate(&host, options, &host_processes, progress);
-    tokio::pin!(deployment);
-    let outcome = tokio::select! {
-        biased;
-        error = lease.lost() => {
-            host_processes.cancel();
-            let _ = deployment.await;
-            activation::Outcome::RecoveryRequired(Error::Lock(error))
-        }
-        outcome = &mut deployment => {
-            match lease.release().await {
-                Ok(()) => outcome,
-                Err(error) if matches!(outcome, activation::Outcome::Activated) => {
-                    activation::Outcome::LeaseReleaseFailed(Error::Lock(error))
-                }
-                Err(error) => {
-                    tracing::warn!(
-                        host = host.id(),
-                        error = %error,
-                        "failed to release deployment lease",
-                    );
-                    outcome
-                }
+) -> Result<Vec<ValidatedHost>, Error> {
+    let results = join_all(
+        locked
+            .into_iter()
+            .zip(progresses)
+            .map(|(host, progress)| host.revalidate(processes, progress)),
+    )
+    .await;
+    let mut validated = Vec::with_capacity(results.len());
+    let mut first_error = None;
+    for result in results {
+        match result {
+            Ok(host) => validated.push(host),
+            Err(error) => {
+                first_error.get_or_insert(error);
             }
         }
-    };
-    outcome.finish_progress(host.id(), progress);
-    outcome
+    }
+    if let Some(error) = first_error {
+        join_all(validated.into_iter().map(ValidatedHost::abandon)).await;
+        for progress in progresses {
+            status::fail(progress);
+        }
+        Err(error)
+    } else {
+        Ok(validated)
+    }
 }
 
 /// Tests, verifies, and persistently activates all reviewed hosts concurrently.
-async fn activate(
+async fn activate_hosts(
     reviewed: Vec<ReviewedHost>,
     options: ActivationOptions,
     processes: &ProcessContext<'_>,
 ) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
-    let mut leases = acquire_leases(&reviewed, &progresses).await?;
-    if let Err(error) = revalidate(&reviewed, &progresses, &mut leases, processes).await {
-        release_leases(leases).await;
-        for progress in &progresses {
-            status::fail(progress);
-        }
-        return Err(error);
-    }
-
-    let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).zip(leases).map(
-        |((host, progress), lease)| activate_with_lease(host, options, processes, progress, lease),
-    ))
+    let locked = acquire_hosts(reviewed, &progresses).await?;
+    let validated = revalidate_hosts(locked, &progresses, processes).await?;
+    let outcomes = join_all(
+        validated
+            .into_iter()
+            .zip(progresses.iter())
+            .map(|(host, progress)| host.activate(options, processes, progress)),
+    )
     .await;
 
     let mut summary = ActivationSummary::default();
