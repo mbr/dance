@@ -2,7 +2,7 @@
 
 use indicatif::ProgressBar;
 
-use super::{ActivationOptions, operations, review::ReviewedHost, rollback};
+use super::{HostOptions, operations, review::ReviewedHost, rollback};
 use crate::{
     error::Error,
     process::ProcessContext,
@@ -41,7 +41,7 @@ impl Outcome {
 /// Handles one failed deployment step according to the rollback policy.
 async fn fail(
     reviewed: &ReviewedHost,
-    options: ActivationOptions,
+    options: HostOptions,
     persistence: rollback::Persistence,
     trigger: Error,
     processes: &ProcessContext<'_>,
@@ -74,7 +74,7 @@ async fn fail(
 /// Locks, validates, prepares, and deploys one reviewed host.
 pub(super) async fn deploy(
     reviewed: ReviewedHost,
-    options: ActivationOptions,
+    options: HostOptions,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Outcome {

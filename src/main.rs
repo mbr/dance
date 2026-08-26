@@ -44,7 +44,7 @@ async fn run(cli: Cli, processes: &ProcessContext<'_>) -> Result<(), Error> {
                 update_flakes: args.update_flakes(),
                 commit_flakes: args.commit_flakes(),
                 approved: args.yes,
-                activation: deployment::ActivationOptions {
+                host: deployment::HostOptions {
                     include_verifier: !args.skip_verifier,
                     rollback: !args.no_rollback,
                     keep_generations: (!args.no_gc).then_some(args.keep_generations),

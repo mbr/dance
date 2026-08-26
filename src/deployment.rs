@@ -39,12 +39,12 @@ pub(crate) struct DeployOptions {
     /// Selects whether interactive approval has been bypassed.
     pub(crate) approved: bool,
     /// Configures work performed after approval.
-    pub(crate) activation: ActivationOptions,
+    pub(crate) host: HostOptions,
 }
 
 /// Configures activation, verification, rollback, and cleanup.
 #[derive(Clone, Copy)]
-pub(crate) struct ActivationOptions {
+pub(crate) struct HostOptions {
     /// Selects whether a configured verifier is included.
     pub(crate) include_verifier: bool,
     /// Selects whether failed deployments restore their reviewed systems.
@@ -65,7 +65,7 @@ struct ReviewResult {
 
 /// Aggregates deployment outcomes for terminal output and exit status.
 #[derive(Default)]
-struct ActivationSummary {
+struct DeploymentSummary {
     /// Counts successful activations.
     activated: usize,
     /// Identifies deployment failures left in place.
@@ -80,7 +80,7 @@ struct ActivationSummary {
     first_error: Option<Error>,
 }
 
-impl ActivationSummary {
+impl DeploymentSummary {
     /// Adds one host outcome.
     fn record(&mut self, host: String, outcome: HostOutcome) {
         let error = match outcome {
@@ -115,7 +115,7 @@ impl ActivationSummary {
     }
 }
 
-impl Display for ActivationSummary {
+impl Display for DeploymentSummary {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         write!(
             formatter,
@@ -185,7 +185,7 @@ pub(crate) async fn deploy(
         return first_error.map_or(Ok(()), Err);
     }
 
-    let deployment = activate_hosts(outdated, options.activation, processes).await;
+    let deployment = deploy_hosts(outdated, options.host, processes).await;
     if let Some(error) = first_error {
         return Err(error);
     }
@@ -354,9 +354,9 @@ fn confirm() -> Result<bool, Error> {
 }
 
 /// Deploys all reviewed hosts independently and concurrently.
-async fn activate_hosts(
+async fn deploy_hosts(
     reviewed: Vec<ReviewedHost>,
-    options: ActivationOptions,
+    options: HostOptions,
     processes: &ProcessContext<'_>,
 ) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
@@ -373,7 +373,7 @@ async fn activate_hosts(
     )
     .await;
 
-    let mut summary = ActivationSummary::default();
+    let mut summary = DeploymentSummary::default();
     for ((host, outcome), progress) in hosts.into_iter().zip(outcomes).zip(progresses) {
         outcome.finish_progress(&host, &progress);
         summary.record(host, outcome);
@@ -384,13 +384,13 @@ async fn activate_hosts(
 
 #[cfg(test)]
 mod tests {
-    use super::{ActivationSummary, HostOutcome};
+    use super::{DeploymentSummary, HostOutcome};
     use crate::error::Error;
 
     /// Checks that successful restoration remains visible and fails the workflow.
     #[test]
     fn rolled_back_hosts_are_reported_as_failures() {
-        let mut summary = ActivationSummary::default();
+        let mut summary = DeploymentSummary::default();
         summary.record(
             "www".to_owned(),
             HostOutcome::RolledBack(Error::ConfirmationRequired),
