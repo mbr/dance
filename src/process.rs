@@ -11,8 +11,9 @@ use indicatif::ProgressBar;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio_process_tools::{
-    ConsumerError, DEFAULT_MAX_BUFFERED_CHUNKS, DEFAULT_READ_CHUNK_SIZE, GracefulShutdown, Process,
-    SpawnError, TerminationError, WaitForCompletionOrTerminateResult, WaitOrTerminateError,
+    ConsumerError, DEFAULT_MAX_BUFFERED_CHUNKS, DEFAULT_READ_CHUNK_SIZE, GracefulShutdown,
+    OutputStream, Process, ProcessHandle, SpawnError, TerminationError,
+    WaitForCompletionOrTerminateResult, WaitOrTerminateError,
 };
 use tokio_util::sync::CancellationToken;
 
@@ -155,6 +156,76 @@ enum Completion {
     TimedOut,
     /// Indicates that application interruption initiated termination.
     Interrupted,
+}
+
+/// Configures process-group termination for a timeout or interruption.
+fn graceful_shutdown(interrupted: bool) -> GracefulShutdown {
+    if interrupted {
+        GracefulShutdown::builder()
+            .unix_sigint(TERMINATION_GRACE)
+            .windows_ctrl_break(TERMINATION_GRACE)
+            .build()
+    } else {
+        GracefulShutdown::builder()
+            .unix_sigterm(TERMINATION_GRACE)
+            .windows_ctrl_break(TERMINATION_GRACE)
+            .build()
+    }
+}
+
+/// Waits for process exit while refreshing progress and honoring cancellation.
+async fn wait_for_process<Stdout, Stderr>(
+    process: &mut ProcessHandle<Stdout, Stderr>,
+    consumers: &OutputConsumers,
+    progress: &ProgressBar,
+    cancellation: &CancellationToken,
+    limit: Duration,
+    command: &str,
+) -> Result<Completion, ProcessError>
+where
+    Stdout: OutputStream + Send,
+    Stderr: OutputStream + Send,
+{
+    let mut refresh = consumers.refresh_interval();
+    let wait_result = {
+        let wait = process
+            .wait_for_completion(limit)
+            .or_terminate(graceful_shutdown(false))
+            .into_future();
+        tokio::pin!(wait);
+        loop {
+            tokio::select! {
+                result = &mut wait => break Some(result),
+                () = cancellation.cancelled() => break None,
+                _ = refresh.tick() => consumers.refresh(progress),
+            }
+        }
+    };
+    match wait_result {
+        Some(Ok(WaitForCompletionOrTerminateResult::Completed(status))) => {
+            Ok(Completion::Exited(status))
+        }
+        Some(Ok(WaitForCompletionOrTerminateResult::TerminatedAfterTimeout { .. })) => {
+            Ok(Completion::TimedOut)
+        }
+        Some(Err(source)) => {
+            process.must_not_be_terminated();
+            Err(ProcessError::Wait(CommandError::new(
+                command.to_owned(),
+                source,
+            )))
+        }
+        None => match process.terminate(graceful_shutdown(true)).await {
+            Ok(_status) => Ok(Completion::Interrupted),
+            Err(source) => {
+                process.must_not_be_terminated();
+                Err(ProcessError::Terminate(CommandError::new(
+                    command.to_owned(),
+                    source,
+                )))
+            }
+        },
+    }
 }
 
 /// Returns the trailing standard-error lines for concise diagnostics.
@@ -319,65 +390,19 @@ impl<'a> Invocation<'a> {
             capture_stdout,
         );
         process.seal_output_replay();
-        let mut refresh = consumers.refresh_interval();
         let limit = self.timeout.unwrap_or(MAX_COMMAND_RUNTIME);
-        let wait_result = {
-            let wait = process
-                .wait_for_completion(limit)
-                .or_terminate(
-                    GracefulShutdown::builder()
-                        .unix_sigterm(TERMINATION_GRACE)
-                        .windows_ctrl_break(TERMINATION_GRACE)
-                        .build(),
-                )
-                .into_future();
-            tokio::pin!(wait);
-            loop {
-                tokio::select! {
-                    result = &mut wait => break Some(result),
-                    () = self.context.cancellation.cancelled() => break None,
-                    _ = refresh.tick() => consumers.refresh(self.progress),
-                }
-            }
-        };
-        let completion = match wait_result {
-            Some(Ok(WaitForCompletionOrTerminateResult::Completed(status))) => {
-                Completion::Exited(status)
-            }
-            Some(Ok(WaitForCompletionOrTerminateResult::TerminatedAfterTimeout { .. })) => {
-                Completion::TimedOut
-            }
-            Some(Err(source)) => {
-                process.must_not_be_terminated();
-                return fail_command(
-                    command_log,
-                    Error::Process(ProcessError::Wait(CommandError::new(
-                        command_display,
-                        source,
-                    ))),
-                );
-            }
-            None => match process
-                .terminate(
-                    GracefulShutdown::builder()
-                        .unix_sigint(TERMINATION_GRACE)
-                        .windows_ctrl_break(TERMINATION_GRACE)
-                        .build(),
-                )
-                .await
-            {
-                Ok(_status) => Completion::Interrupted,
-                Err(source) => {
-                    process.must_not_be_terminated();
-                    return fail_command(
-                        command_log,
-                        Error::Process(ProcessError::Terminate(CommandError::new(
-                            command_display,
-                            source,
-                        ))),
-                    );
-                }
-            },
+        let completion = match wait_for_process(
+            &mut process,
+            &consumers,
+            self.progress,
+            &self.context.cancellation,
+            limit,
+            &command_display,
+        )
+        .await
+        {
+            Ok(completion) => completion,
+            Err(error) => return fail_command(command_log, Error::Process(error)),
         };
         let output = match consumers.finish(&command_display, self.progress).await {
             Ok(output) => output,
