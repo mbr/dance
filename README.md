@@ -54,7 +54,7 @@ will query every host, which performs the following steps:
 3. Run a verifier against the system (see "verifiers" below).
 4. Report whether the system needs to be updated.
 
-This is run for all servers in parallel
+This is run for all servers in parallel.
 
 ## Deploying servers
 
@@ -70,67 +70,21 @@ Using `deploy` instead of `status` will perform everything `status` does and the
 
 A failed activation or verifier immediately restores the previous system. If Dance exits or loses contact first, the watchdog performs the same restoration when its deadline expires.
 
-## Usage
+## Updating flake inputs
 
-Run Dance from a directory containing `inventory.toml` (override through either `DANCE_INVENTORY` or `--inventory`):
-
-```toml
-# `www` is the ID used on the command line and in output.
-[hosts.www]
-# Hostname or SSH configuration alias used to reach the machine.
-ssh_host = "www.example.com"
-# Flake directory, relative to this inventory.
-flake_path = "../production"
-# Server configuration within the flake.
-flake_name = "web-server"
-```
-
-Running
+Pass `--update` to run `nix flake update` once for each selected flake before Dance evaluates its desired systems:
 
 ```console
-dance status
+$ dance status --update
+$ dance deploy --update
 ```
 
-compares the active system on `www.example.com` with the system defined locally and runs its configured verifier. The `VALID` column reports `yes`, `-` when no verifier is configured, or `failed`. Pass one or more inventory IDs to limit the status check:
+The updated `flake.lock` remains in the worktree for review. For deployments, add `--commit` to commit changed lock files after every selected host has deployed successfully; `--git` is shorthand for `--update --commit`:
 
 ```console
-dance status www
-dance status --update www # Update the production flake before comparison
+$ dance deploy --update --commit
+$ dance deploy --git
 ```
-
-To deploy outdated systems, run:
-
-```console
-dance deploy
-dance deploy www                   # Deploy only the www inventory entry
-dance deploy --update www          # Update its flake before deploying
-dance deploy --update --commit www # Commit the lock after successful deployment
-dance deploy --git www             # Shorthand for --update --commit
-```
-
-Dance deploys each reviewed server independently. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If rollback cannot be confirmed, inspect the machine and use its console if necessary.
-
-A deployment centers on these complete rebuild commands:
-
-```console
-nixos-rebuild dry-activate --use-substitutes --flake ../production#web-server --target-host root@www.example.com
-# Arm target-side rollback, then:
-nixos-rebuild test --use-substitutes --flake ../production#web-server --target-host root@www.example.com
-# Run the optional verifier, then:
-nixos-rebuild switch --use-substitutes --flake ../production#web-server --target-host root@www.example.com
-```
-
-After a verified deployment, Dance keeps the current and previous system generations and collects unreachable paths on that server. Use `--keep-generations` to change the limit or `--no-gc` to skip cleanup.
-
-With `--update --commit`, or its `--git` shorthand, Dance requires `flake.nix` and the tracked `flake.lock` to be clean before updating. After every selected host deploys successfully, changed locks are committed as `Update flake inputs`. The commit contains only those lock files and preserves unrelated staged changes.
-
-## Safety
-
-Editing `flake.nix`, `flake.lock`, or other flake source files while Dance is running is undefined behavior.
-
-Before preparing a server, Dance acquires `/run/lock/dance-deployment.lock` through SSH, rejects any watchdog left by an earlier deployment, and verifies that the reviewed system is still active. That server's deployment fails rather than waiting when another Dance process holds its lock. An inherited watchdog must finish or be resolved manually before retrying. Dance assumes an acquired lock's SSH process remains alive until release. The lock is advisory and does not prevent manual `nixos-rebuild` commands.
-
-Targets must be reachable through noninteractive SSH authentication. Dance disables password prompts and uses connection timeouts and keepalives for its SSH and `nixos-rebuild` operations. The watchdog is transient and best-effort: it does not survive a target reboot or failures that stop systemd. Deployments must retain an out-of-band recovery path such as a hosting console.
 
 ## Verification
 
