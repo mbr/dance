@@ -425,7 +425,7 @@ mod tests {
     use super::{Invocation, ProcessContext, ProcessError};
     use crate::{
         error::Error,
-        logs::{LogMode, LogSession, SUBSCRIBER_LOCK, test_subscriber},
+        logs::{LogMode, LogSession, with_test_log_session},
     };
 
     /// Checks bounded termination and explicit cancellation reporting.
@@ -467,37 +467,31 @@ mod tests {
     /// Checks that output decoding failures are reported.
     #[test]
     fn invalid_command_output_is_reported() {
-        let _subscriber_lock = SUBSCRIBER_LOCK
-            .lock()
-            .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let logs = LogSession::start(LogMode::Always, Some(base.path()))
-            .expect("enabled logs should start");
-        let subscriber = test_subscriber(&logs);
-        let _subscriber = tracing::subscriber::set_default(subscriber);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("Tokio runtime should start");
-        runtime.block_on(async {
-            let progress = ProgressBar::hidden();
-            let context = ProcessContext::new(&logs, CancellationToken::new());
-            Invocation::new(&context, "ignored-output", "sh", &progress)
-                .arguments(["-c", "printf '\\377'"])
-                .status()
-                .await
-                .expect("discarded output should not require UTF-8");
-            let result = Invocation::new(&context, "invalid-output", "sh", &progress)
-                .arguments(["-c", "printf '\\377'"])
-                .output()
-                .await;
-            let error = result.expect_err("non-UTF-8 output should fail");
-            assert!(matches!(error, Error::Process(ProcessError::Output { .. })));
+        let directory = with_test_log_session(LogMode::Always, base.path(), |logs| {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("Tokio runtime should start");
+            runtime.block_on(async {
+                let progress = ProgressBar::hidden();
+                let context = ProcessContext::new(&logs, CancellationToken::new());
+                Invocation::new(&context, "ignored-output", "sh", &progress)
+                    .arguments(["-c", "printf '\\377'"])
+                    .status()
+                    .await
+                    .expect("discarded output should not require UTF-8");
+                let result = Invocation::new(&context, "invalid-output", "sh", &progress)
+                    .arguments(["-c", "printf '\\377'"])
+                    .output()
+                    .await;
+                let error = result.expect_err("non-UTF-8 output should fail");
+                assert!(matches!(error, Error::Process(ProcessError::Output { .. })));
+            });
+            logs.finish(Some("invalid output"))
+                .expect("enabled logs should finish")
+                .expect("always logs should be retained")
         });
-        let directory = logs
-            .finish(Some("invalid output"))
-            .expect("enabled logs should finish")
-            .expect("always logs should be retained");
         assert_eq!(
             fs::read(directory.join("001.stdout")).expect("ignored output log should be readable"),
             [0xff]

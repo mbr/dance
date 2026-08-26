@@ -366,22 +366,29 @@ fn create_run_directory(base: &Path) -> Result<PathBuf, LogError> {
     Ok(path)
 }
 
-/// Serializes tests that replace tracing's thread-local subscriber.
+/// Runs a test with an isolated persistent log session and tracing subscriber.
 #[cfg(test)]
-pub(crate) static SUBSCRIBER_LOCK: Mutex<()> = Mutex::new(());
+pub(crate) fn with_test_log_session<T>(
+    mode: LogMode,
+    base: &Path,
+    operation: impl FnOnce(LogSession) -> T,
+) -> T {
+    static SUBSCRIBER_LOCK: Mutex<()> = Mutex::new(());
 
-/// Creates an isolated subscriber for a log test.
-#[cfg(test)]
-pub(crate) fn test_subscriber(logs: &LogSession) -> impl tracing::Subscriber {
+    let _subscriber_lock = SUBSCRIBER_LOCK
+        .lock()
+        .expect("subscriber test lock should not be poisoned");
+    let logs = LogSession::start(mode, Some(base)).expect("test log session should start");
     let writer = logs
         .writer()
-        .expect("enabled logs should provide a tracing writer");
-    tracing_subscriber::fmt()
+        .expect("test log session should provide a tracing writer");
+    let subscriber = tracing_subscriber::fmt()
         .compact()
         .with_ansi(false)
         .with_target(false)
         .with_writer(writer)
-        .finish()
+        .finish();
+    tracing::subscriber::with_default(subscriber, || operation(logs))
 }
 
 #[cfg(test)]
@@ -390,10 +397,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{
-        CommandLogs, LogMode, LogSession, OutputLogs, SUBSCRIBER_LOCK, state_directory,
-        test_subscriber,
-    };
+    use super::{CommandLogs, LogMode, OutputLogs, state_directory, with_test_log_session};
 
     /// Checks XDG state overrides and the home-directory fallback.
     #[test]
@@ -421,14 +425,8 @@ mod tests {
     /// Checks that retained runs contain tracing and output artifacts.
     #[test]
     fn retained_run_contains_command_artifacts() {
-        let _subscriber_lock = SUBSCRIBER_LOCK
-            .lock()
-            .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let logs = LogSession::start(LogMode::Always, Some(base.path()))
-            .expect("log session should start");
-        let subscriber = test_subscriber(&logs);
-        let directory = tracing::subscriber::with_default(subscriber, || {
+        let directory = with_test_log_session(LogMode::Always, base.path(), |logs| {
             logs.record_start(Path::new("inventory.toml"));
             let CommandLogs {
                 lifecycle: command,
@@ -477,33 +475,26 @@ mod tests {
     /// Checks fail-safe retention and successful cleanup for automatic logs.
     #[test]
     fn automatic_logs_preserve_interruptions_and_remove_successes() {
-        let _subscriber_lock = SUBSCRIBER_LOCK
-            .lock()
-            .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let interrupted = LogSession::start(LogMode::OnError, Some(base.path()))
-            .expect("log session should start");
-        let interrupted_path = interrupted
-            .directory()
-            .expect("enabled logs should have a directory")
-            .to_path_buf();
-        let subscriber = test_subscriber(&interrupted);
-        tracing::subscriber::with_default(subscriber, || {
-            interrupted.record_start(Path::new("inventory.toml"));
-            drop(interrupted);
-        });
+        let interrupted_path =
+            with_test_log_session(LogMode::OnError, base.path(), |interrupted| {
+                let path = interrupted
+                    .directory()
+                    .expect("enabled logs should have a directory")
+                    .to_path_buf();
+                interrupted.record_start(Path::new("inventory.toml"));
+                drop(interrupted);
+                path
+            });
         let trace = fs::read_to_string(interrupted_path.join("run.log"))
             .expect("interrupted trace log should be readable");
         assert!(trace.contains("run interrupted"));
 
-        let successful = LogSession::start(LogMode::OnError, Some(base.path()))
-            .expect("log session should start");
-        let successful_path = successful
-            .directory()
-            .expect("enabled logs should have a directory")
-            .to_path_buf();
-        let subscriber = test_subscriber(&successful);
-        tracing::subscriber::with_default(subscriber, || {
+        let successful_path = with_test_log_session(LogMode::OnError, base.path(), |successful| {
+            let path = successful
+                .directory()
+                .expect("enabled logs should have a directory")
+                .to_path_buf();
             successful.record_start(Path::new("inventory.toml"));
             assert_eq!(
                 successful
@@ -511,6 +502,7 @@ mod tests {
                     .expect("successful run should finish"),
                 None
             );
+            path
         });
         assert!(!successful_path.exists());
     }
