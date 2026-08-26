@@ -1,12 +1,25 @@
 # Dance
 
-`nixos-rebuild` is a good way to deploy NixOS servers. Dance keeps its complete `dry-activate`, `test`, and `switch` operations and adds the orchestration and failure handling needed to use them across an inventory:
+`nixos-rebuild` can deploy a flake-based NixOS server with a single command:
 
-- Short host IDs, shared flake updates, one approval prompt, parallel deployments, progress, summaries, and persistent logs.
-- Per-host deployment locks and revalidation of the system reviewed before approval.
-- Optional external or SSH-based verification of the temporarily activated candidate.
-- A target-side rollback watchdog covering testing, verification, and switching.
-- Isolated `flake.lock` commits and post-deployment garbage collection.
+```console
+nixos-rebuild switch --use-substitutes --flake .#web-server --target-host root@www.example.com
+```
+
+`dance` wraps this in a nice utility to make it more comfortable:
+
+(TKTK asciinema record that i already have will go here)
+
+## What `dance` does for you
+
+Dance keeps the complete `nixos-rebuild` operations and adds:
+
+- An inventory list of hosts to deploy, mapping a flake output to a remote host.
+- Parallel execution of all selected deployments.
+- Status queries: evaluate the desired system locally, then check if the remote needs to be updated.
+- Rollback including watchdog timers -- if you lock yourself out of SSH, wait 6 minutes for it to revert automatically.
+- Deployment locks to prevent accidental parallel Dance deployments.
+- Verification of deployments: write a script to smoke-test a server, with automatic rollbacks on failure.
 
 The top-level flow is `update -> review -> approve -> deploy hosts independently`. Each approved, outdated host follows one state machine:
 
