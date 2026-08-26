@@ -5,8 +5,8 @@ use indicatif::ProgressBar;
 use super::{ActivationOptions, operations, review::ReviewedHost, rollback};
 use crate::{
     error::Error,
-    lock::DeploymentLock,
     process::ProcessContext,
+    ssh::lock::DeploymentLock,
     status::{self, DeploymentPhase},
     verification,
 };

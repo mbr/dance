@@ -1,4 +1,6 @@
-//! Shared noninteractive SSH policy.
+//! Shared noninteractive SSH policy and operations.
+
+pub(crate) mod lock;
 
 /// Configures unattended connections and detects unreachable peers promptly.
 pub(crate) const ARGUMENTS: [&str; 8] = [

@@ -6,9 +6,9 @@ use thiserror::Error;
 
 use crate::{
     inventory::InventoryError,
-    lock::LockError,
     logs::LogError,
     process::ProcessError,
+    ssh::lock::LockError,
     store_path::{StorePath, StorePathError},
 };
 

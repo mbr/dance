@@ -31,7 +31,7 @@ use tokio::{
     task::JoinHandle,
 };
 
-use crate::ssh;
+use super::ARGUMENTS;
 
 /// Identifies successful lock acquisition on standard output.
 const ACQUIRED: &[u8] = b"dance-lock-acquired\n";
@@ -113,10 +113,7 @@ impl DeploymentLock {
     /// Acquires a non-blocking deployment lock through SSH.
     pub(crate) async fn acquire(host: &str, ssh_target: &str) -> Result<Self, LockError> {
         let mut command = Command::new("ssh");
-        command
-            .args(ssh::ARGUMENTS)
-            .arg(ssh_target)
-            .arg(REMOTE_COMMAND);
+        command.args(ARGUMENTS).arg(ssh_target).arg(REMOTE_COMMAND);
         Self::spawn(host, command).await
     }
 

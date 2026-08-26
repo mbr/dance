@@ -5,7 +5,6 @@ mod deployment;
 mod error;
 mod git;
 mod inventory;
-mod lock;
 mod logs;
 mod process;
 mod ssh;
