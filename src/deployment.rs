@@ -281,6 +281,45 @@ async fn revalidate(
     Ok(())
 }
 
+/// Activates one host while continuously monitoring and then releasing its lease.
+async fn activate_with_lease(
+    host: ReviewedHost,
+    options: ActivationOptions,
+    processes: &ProcessContext<'_>,
+    progress: &indicatif::ProgressBar,
+    mut lease: DeploymentLease,
+) -> activation::Outcome {
+    let host_processes = processes.child();
+    let deployment = activation::activate(&host, options, &host_processes, progress);
+    tokio::pin!(deployment);
+    let outcome = tokio::select! {
+        biased;
+        error = lease.lost() => {
+            host_processes.cancel();
+            let _ = deployment.await;
+            activation::Outcome::RecoveryRequired(Error::Lock(error))
+        }
+        outcome = &mut deployment => {
+            match lease.release().await {
+                Ok(()) => outcome,
+                Err(error) if matches!(outcome, activation::Outcome::Activated) => {
+                    activation::Outcome::LeaseReleaseFailed(Error::Lock(error))
+                }
+                Err(error) => {
+                    tracing::warn!(
+                        host = host.id(),
+                        error = %error,
+                        "failed to release deployment lease",
+                    );
+                    outcome
+                }
+            }
+        }
+    };
+    outcome.finish_progress(host.id(), progress);
+    outcome
+}
+
 /// Tests, verifies, and persistently activates all reviewed hosts concurrently.
 async fn activate(
     reviewed: Vec<ReviewedHost>,
@@ -299,37 +338,7 @@ async fn activate(
     }
 
     let outcomes = join_all(reviewed.into_iter().zip(progresses.iter()).zip(leases).map(
-        |((host, progress), mut lease)| async move {
-            let host_processes = processes.child();
-            let deployment = activation::activate(&host, options, &host_processes, progress);
-            tokio::pin!(deployment);
-            let outcome = tokio::select! {
-                biased;
-                error = lease.lost() => {
-                    host_processes.cancel();
-                    let _ = deployment.await;
-                    activation::Outcome::RecoveryRequired(Error::Lock(error))
-                }
-                outcome = &mut deployment => {
-                    match lease.release().await {
-                        Ok(()) => outcome,
-                        Err(error) if matches!(outcome, activation::Outcome::Activated) => {
-                            activation::Outcome::LeaseReleaseFailed(Error::Lock(error))
-                        }
-                        Err(error) => {
-                            tracing::warn!(
-                                host = host.id(),
-                                error = %error,
-                                "failed to release deployment lease",
-                            );
-                            outcome
-                        }
-                    }
-                }
-            };
-            outcome.finish_progress(host.id(), progress);
-            outcome
-        },
+        |((host, progress), lease)| activate_with_lease(host, options, processes, progress, lease),
     ))
     .await;
 
