@@ -1,4 +1,4 @@
-//! Lock-protected deployment state machine for one reviewed host.
+//! Lock-protected deployment workflow for one reviewed host.
 
 use indicatif::ProgressBar;
 
@@ -10,34 +10,6 @@ use crate::{
     status::{self, DeploymentPhase},
     verification::PreparedVerifier,
 };
-
-/// Owns a reviewed host and its optional prebuilt verifier.
-pub(super) struct PreparedHost {
-    /// Contains the reviewed host state.
-    reviewed: ReviewedHost,
-    /// Contains the verifier built before any host activation.
-    verifier: Option<PreparedVerifier>,
-}
-
-/// Owns a prepared host and its acquired deployment lock.
-pub(super) struct LockedHost {
-    /// Contains the reviewed host state.
-    reviewed: ReviewedHost,
-    /// Contains the verifier built before any host activation.
-    verifier: Option<PreparedVerifier>,
-    /// Guards the host against overlapping deployment.
-    _lock: DeploymentLock,
-}
-
-/// Owns a locked host whose active system was revalidated.
-pub(super) struct ValidatedHost {
-    /// Contains the reviewed host state.
-    reviewed: ReviewedHost,
-    /// Contains the verifier built before any host activation.
-    verifier: Option<PreparedVerifier>,
-    /// Guards the host throughout activation and recovery.
-    _lock: DeploymentLock,
-}
 
 /// Describes the result of one host deployment.
 pub(super) enum Outcome {
@@ -63,97 +35,6 @@ impl Outcome {
             Self::RecoveryRequired(_) => status::recovery_required(progress, host),
             Self::CleanupFailed(_) => status::cleanup_failed(progress, host),
         }
-    }
-}
-
-impl PreparedHost {
-    /// Builds the reviewed host's verifier without modifying the host.
-    pub(super) async fn prepare(
-        reviewed: ReviewedHost,
-        include_verifier: bool,
-        processes: &ProcessContext<'_>,
-        progress: &ProgressBar,
-    ) -> Result<Self, Error> {
-        let verifier = if include_verifier {
-            status::set_phase(progress, reviewed.id(), DeploymentPhase::BuildingVerifier);
-            PreparedVerifier::prepare(&reviewed.host, processes, progress).await?
-        } else {
-            None
-        };
-        Ok(Self { reviewed, verifier })
-    }
-
-    /// Returns the inventory identity of the prepared host.
-    pub(super) fn id(&self) -> &str {
-        self.reviewed.id()
-    }
-}
-
-impl LockedHost {
-    /// Acquires the prepared host's deployment lock.
-    pub(super) async fn acquire(
-        prepared: PreparedHost,
-        progress: &ProgressBar,
-    ) -> Result<Self, Error> {
-        status::set_phase(progress, prepared.id(), DeploymentPhase::Locking);
-        let lock = DeploymentLock::acquire(prepared.id(), &prepared.reviewed.host.ssh_url())
-            .await
-            .map_err(Error::Lock)?;
-        Ok(Self {
-            reviewed: prepared.reviewed,
-            verifier: prepared.verifier,
-            _lock: lock,
-        })
-    }
-
-    /// Revalidates the active system while holding the deployment lock.
-    pub(super) async fn revalidate(
-        self,
-        processes: &ProcessContext<'_>,
-        progress: &ProgressBar,
-    ) -> Result<ValidatedHost, Error> {
-        let active =
-            operations::deployed_store_path(&self.reviewed.host, processes, progress).await;
-        let active = active?;
-        if active != self.reviewed.deployed {
-            let error = Error::DeploymentStateChanged {
-                host: self.reviewed.id().to_owned(),
-                reviewed: self.reviewed.deployed.clone(),
-                active,
-            };
-            return Err(error);
-        }
-        Ok(ValidatedHost {
-            reviewed: self.reviewed,
-            verifier: self.verifier,
-            _lock: self._lock,
-        })
-    }
-}
-
-impl ValidatedHost {
-    /// Returns the inventory identity of the validated host.
-    pub(super) fn id(&self) -> &str {
-        self.reviewed.id()
-    }
-
-    /// Runs activation and recovery while owning the host lock.
-    pub(super) async fn activate(
-        self,
-        options: ActivationOptions,
-        processes: &ProcessContext<'_>,
-        progress: &ProgressBar,
-    ) -> Outcome {
-        let outcome = run_activation(
-            &self.reviewed,
-            self.verifier.as_ref(),
-            options,
-            processes,
-            progress,
-        )
-        .await;
-        outcome.finish_progress(self.reviewed.id(), progress);
-        outcome
     }
 }
 
@@ -190,18 +71,45 @@ async fn fail(
     }
 }
 
-/// Temporarily activates, verifies, persists, and cleans one host configuration.
-async fn run_activation(
-    reviewed: &ReviewedHost,
-    verifier: Option<&PreparedVerifier>,
+/// Locks, validates, prepares, and deploys one reviewed host.
+pub(super) async fn deploy(
+    reviewed: ReviewedHost,
     options: ActivationOptions,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Outcome {
-    status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Testing);
+    status::set_phase(progress, reviewed.id(), DeploymentPhase::Locking);
+    let _lock = match DeploymentLock::acquire(reviewed.id(), &reviewed.host.ssh_url()).await {
+        Ok(lock) => lock,
+        Err(error) => return Outcome::Failed(Error::Lock(error)),
+    };
+
+    let active = match operations::deployed_store_path(&reviewed.host, processes, progress).await {
+        Ok(active) => active,
+        Err(error) => return Outcome::Failed(error),
+    };
+    if active != reviewed.deployed {
+        return Outcome::Failed(Error::DeploymentStateChanged {
+            host: reviewed.id().to_owned(),
+            reviewed: reviewed.deployed.clone(),
+            active,
+        });
+    }
+
+    let verifier = if options.include_verifier {
+        status::set_phase(progress, reviewed.id(), DeploymentPhase::BuildingVerifier);
+        match PreparedVerifier::prepare(&reviewed.host, processes, progress).await {
+            Ok(verifier) => verifier,
+            Err(error) => return Outcome::Failed(error),
+        }
+    } else {
+        None
+    };
+
+    status::set_phase(progress, reviewed.id(), DeploymentPhase::Testing);
     if let Err(error) = operations::test(&reviewed.host, processes, progress).await {
         return fail(
-            reviewed,
+            &reviewed,
             options,
             rollback::Persistence::Runtime,
             error,
@@ -211,15 +119,11 @@ async fn run_activation(
         .await;
     }
 
-    if let Some(verifier) = verifier {
-        status::set_phase(
-            progress,
-            reviewed.host.id(),
-            DeploymentPhase::RunningVerifier,
-        );
+    if let Some(verifier) = &verifier {
+        status::set_phase(progress, reviewed.id(), DeploymentPhase::RunningVerifier);
         if let Err(error) = verifier.run(&reviewed.host, processes, progress).await {
             return fail(
-                reviewed,
+                &reviewed,
                 options,
                 rollback::Persistence::Runtime,
                 error,
@@ -230,10 +134,10 @@ async fn run_activation(
         }
     }
 
-    status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Switching);
+    status::set_phase(progress, reviewed.id(), DeploymentPhase::Switching);
     if let Err(error) = operations::switch(&reviewed.host, processes, progress).await {
         return fail(
-            reviewed,
+            &reviewed,
             options,
             rollback::Persistence::System,
             error,
@@ -244,11 +148,7 @@ async fn run_activation(
     }
 
     if let Some(keep_generations) = options.keep_generations {
-        status::set_phase(
-            progress,
-            reviewed.host.id(),
-            DeploymentPhase::CollectingGarbage,
-        );
+        status::set_phase(progress, reviewed.id(), DeploymentPhase::CollectingGarbage);
         if let Err(error) =
             operations::collect_garbage(&reviewed.host, keep_generations, processes, progress).await
         {

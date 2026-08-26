@@ -16,7 +16,7 @@ use futures::future::join_all;
 use tabled::Table;
 
 use self::{
-    host::{LockedHost, Outcome as HostOutcome, PreparedHost, ValidatedHost},
+    host::Outcome as HostOutcome,
     review::{HostRow, ReviewOutcome, ReviewedHost, Validity},
 };
 use crate::{
@@ -349,108 +349,7 @@ fn confirm() -> Result<bool, Error> {
         .map_err(|source| Error::Confirmation { source })
 }
 
-/// Builds every configured verifier before any host can be modified.
-async fn prepare_hosts(
-    reviewed: Vec<ReviewedHost>,
-    include_verifier: bool,
-    progresses: &[indicatif::ProgressBar],
-    processes: &ProcessContext<'_>,
-) -> Result<Vec<PreparedHost>, Error> {
-    let results = join_all(
-        reviewed
-            .into_iter()
-            .zip(progresses)
-            .map(|(host, progress)| {
-                PreparedHost::prepare(host, include_verifier, processes, progress)
-            }),
-    )
-    .await;
-    let mut prepared = Vec::with_capacity(results.len());
-    let mut first_error = None;
-    for result in results {
-        match result {
-            Ok(host) => prepared.push(host),
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
-        }
-    }
-    if let Some(error) = first_error {
-        for progress in progresses {
-            status::fail(progress);
-        }
-        Err(error)
-    } else {
-        Ok(prepared)
-    }
-}
-
-/// Acquires every host lock without beginning partial activation.
-async fn acquire_hosts(
-    prepared: Vec<PreparedHost>,
-    progresses: &[indicatif::ProgressBar],
-) -> Result<Vec<LockedHost>, Error> {
-    let results = join_all(
-        prepared
-            .into_iter()
-            .zip(progresses)
-            .map(|(host, progress)| LockedHost::acquire(host, progress)),
-    )
-    .await;
-    let mut locked = Vec::with_capacity(results.len());
-    let mut first_error = None;
-    for result in results {
-        match result {
-            Ok(host) => locked.push(host),
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
-        }
-    }
-    if let Some(error) = first_error {
-        for progress in progresses {
-            status::fail(progress);
-        }
-        Err(error)
-    } else {
-        Ok(locked)
-    }
-}
-
-/// Revalidates every locked host before allowing any activation.
-async fn revalidate_hosts(
-    locked: Vec<LockedHost>,
-    progresses: &[indicatif::ProgressBar],
-    processes: &ProcessContext<'_>,
-) -> Result<Vec<ValidatedHost>, Error> {
-    let results = join_all(
-        locked
-            .into_iter()
-            .zip(progresses)
-            .map(|(host, progress)| host.revalidate(processes, progress)),
-    )
-    .await;
-    let mut validated = Vec::with_capacity(results.len());
-    let mut first_error = None;
-    for result in results {
-        match result {
-            Ok(host) => validated.push(host),
-            Err(error) => {
-                first_error.get_or_insert(error);
-            }
-        }
-    }
-    if let Some(error) = first_error {
-        for progress in progresses {
-            status::fail(progress);
-        }
-        Err(error)
-    } else {
-        Ok(validated)
-    }
-}
-
-/// Tests, verifies, and persistently activates all reviewed hosts concurrently.
+/// Deploys all reviewed hosts independently and concurrently.
 async fn activate_hosts(
     reviewed: Vec<ReviewedHost>,
     options: ActivationOptions,
@@ -458,24 +357,21 @@ async fn activate_hosts(
 ) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
-    let prepared =
-        prepare_hosts(reviewed, options.include_verifier, &progresses, processes).await?;
-    let locked = acquire_hosts(prepared, &progresses).await?;
-    let validated = revalidate_hosts(locked, &progresses, processes).await?;
-    let hosts = validated
+    let hosts = reviewed
         .iter()
         .map(|host| host.id().to_owned())
         .collect::<Vec<_>>();
     let outcomes = join_all(
-        validated
+        reviewed
             .into_iter()
-            .zip(progresses.iter())
-            .map(|(host, progress)| host.activate(options, processes, progress)),
+            .zip(&progresses)
+            .map(|(host, progress)| host::deploy(host, options, processes, progress)),
     )
     .await;
 
     let mut summary = ActivationSummary::default();
-    for (host, outcome) in hosts.into_iter().zip(outcomes) {
+    for ((host, outcome), progress) in hosts.into_iter().zip(outcomes).zip(progresses) {
+        outcome.finish_progress(&host, &progress);
         summary.record(host, outcome);
     }
     println!("{summary}");
