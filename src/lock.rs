@@ -1,4 +1,4 @@
-//! Remote deployment leases held through SSH.
+//! Remote deployment locks held through SSH.
 
 use std::{
     io,
@@ -15,11 +15,11 @@ use tokio::{
 
 use crate::ssh;
 
-/// Identifies successful lease acquisition on standard output.
+/// Identifies successful lock acquisition on standard output.
 const ACQUIRED: &[u8] = b"dance-lock-acquired\n";
-/// Limits SSH connection and lease acquisition.
+/// Limits SSH connection and lock acquisition.
 const ACQUISITION_TIMEOUT: Duration = Duration::from_mins(1);
-/// Limits graceful lease release.
+/// Limits graceful lock release.
 const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Runs while holding the remote file lock.
 const REMOTE_COMMAND: &str = concat!(
@@ -30,16 +30,16 @@ const REMOTE_COMMAND: &str = concat!(
     "exec /run/current-system/sw/bin/cat >/dev/null'",
 );
 
-/// Describes failures while managing a remote deployment lease.
+/// Describes failures while managing a remote deployment lock.
 #[derive(Debug, Error)]
 pub(crate) enum LockError {
-    /// Indicates that another process holds the host lease.
+    /// Indicates that another process holds the host lock.
     #[error("deployment lock on host `{host}` is already held")]
     Unavailable {
         /// Identifies the target host.
         host: String,
     },
-    /// Indicates that the SSH lease process could not be started.
+    /// Indicates that the SSH lock process could not be started.
     #[error("failed to start deployment lock on host `{host}`")]
     Spawn {
         /// Identifies the target host.
@@ -48,13 +48,13 @@ pub(crate) enum LockError {
         #[source]
         source: io::Error,
     },
-    /// Indicates that lease acquisition exceeded its deadline.
+    /// Indicates that lock acquisition exceeded its deadline.
     #[error("timed out acquiring deployment lock on host `{host}`")]
     AcquisitionTimedOut {
         /// Identifies the target host.
         host: String,
     },
-    /// Indicates that the lease process failed before acquisition.
+    /// Indicates that the lock process failed before acquisition.
     #[error("failed to acquire deployment lock on host `{host}` ({status}): {stderr}")]
     AcquisitionFailed {
         /// Identifies the target host.
@@ -64,13 +64,13 @@ pub(crate) enum LockError {
         /// Contains concise process diagnostics.
         stderr: String,
     },
-    /// Indicates that the lease process did not acknowledge acquisition.
+    /// Indicates that the lock process did not acknowledge acquisition.
     #[error("deployment lock on host `{host}` returned an invalid acknowledgement")]
     InvalidAcknowledgement {
         /// Identifies the target host.
         host: String,
     },
-    /// Indicates that lease process output could not be read.
+    /// Indicates that lock process output could not be read.
     #[error("failed to read deployment lock process for host `{host}`")]
     Output {
         /// Identifies the target host.
@@ -79,17 +79,7 @@ pub(crate) enum LockError {
         #[source]
         source: io::Error,
     },
-    /// Indicates that an acquired lease ended unexpectedly.
-    #[error("deployment lock on host `{host}` was lost ({status}): {stderr}")]
-    Lost {
-        /// Identifies the target host.
-        host: String,
-        /// Contains the SSH process status.
-        status: ExitStatus,
-        /// Contains concise process diagnostics.
-        stderr: String,
-    },
-    /// Indicates that a lease could not be released cleanly.
+    /// Indicates that a lock could not be released cleanly.
     #[error("failed to release deployment lock on host `{host}`")]
     Release {
         /// Identifies the target host.
@@ -98,13 +88,13 @@ pub(crate) enum LockError {
         #[source]
         source: io::Error,
     },
-    /// Indicates that lease release exceeded its deadline.
+    /// Indicates that lock release exceeded its deadline.
     #[error("timed out releasing deployment lock on host `{host}`")]
     ReleaseTimedOut {
         /// Identifies the target host.
         host: String,
     },
-    /// Indicates that the lease process failed during release.
+    /// Indicates that the lock process failed during release.
     #[error("deployment lock process for host `{host}` exited with {status}: {stderr}")]
     ReleaseFailed {
         /// Identifies the target host.
@@ -116,20 +106,23 @@ pub(crate) enum LockError {
     },
 }
 
-/// Holds an exclusive deployment lease on one host.
-pub(crate) struct DeploymentLease {
-    /// Owns the SSH lease process.
+/// Holds an exclusive deployment lock on one host.
+///
+/// Dropping the guard closes its input and drops the kill-on-drop SSH child. Normal workflows call
+/// [`Self::release`] to await shutdown and report failures.
+pub(crate) struct DeploymentLock {
+    /// Owns the SSH lock process.
     child: Child,
     /// Keeps the remote lock holder's standard input open.
-    stdin: Option<ChildStdin>,
+    stdin: ChildStdin,
     /// Collects SSH diagnostics without blocking the child.
-    stderr: Option<JoinHandle<Result<Vec<u8>, io::Error>>>,
+    stderr: JoinHandle<Result<Vec<u8>, io::Error>>,
     /// Identifies the target host.
     host: String,
 }
 
-impl DeploymentLease {
-    /// Acquires a non-blocking deployment lease through SSH.
+impl DeploymentLock {
+    /// Acquires a non-blocking deployment lock through SSH.
     pub(crate) async fn acquire(host: &str, ssh_target: &str) -> Result<Self, LockError> {
         let mut command = Command::new("ssh");
         command
@@ -139,7 +132,7 @@ impl DeploymentLease {
         Self::spawn(host, command).await
     }
 
-    /// Starts a lease command and waits for its acquisition acknowledgement.
+    /// Starts a lock command and waits for its acquisition acknowledgement.
     async fn spawn(host: &str, mut command: Command) -> Result<Self, LockError> {
         command
             .stdin(Stdio::piped())
@@ -153,15 +146,15 @@ impl DeploymentLease {
         let stdin = child
             .stdin
             .take()
-            .expect("lease command standard input should be piped");
+            .expect("lock command standard input should be piped");
         let mut stdout = child
             .stdout
             .take()
-            .expect("lease command standard output should be piped");
+            .expect("lock command standard output should be piped");
         let mut stderr = child
             .stderr
             .take()
-            .expect("lease command standard error should be piped");
+            .expect("lock command standard error should be piped");
         let stderr = tokio::spawn(async move {
             let mut output = Vec::new();
             stderr.read_to_end(&mut output).await?;
@@ -175,8 +168,8 @@ impl DeploymentLease {
         match acquisition {
             Ok(Ok(_)) if acknowledgement == ACQUIRED => Ok(Self {
                 child,
-                stdin: Some(stdin),
-                stderr: Some(stderr),
+                stdin,
+                stderr,
                 host: host.to_owned(),
             }),
             Ok(Ok(_)) => {
@@ -225,57 +218,29 @@ impl DeploymentLease {
         }
     }
 
-    /// Waits for an acquired lease to end unexpectedly.
-    pub(crate) async fn lost(&mut self) -> LockError {
-        let status = match self.child.wait().await {
-            Ok(status) => status,
-            Err(source) => {
-                return LockError::Output {
-                    host: self.host.clone(),
-                    source,
-                };
-            }
-        };
-        let stderr = match self.stderr.take() {
-            Some(stderr) => stderr_text(stderr, &self.host)
-                .await
-                .unwrap_or_else(|error| error.to_string()),
-            None => "no standard error output".to_owned(),
-        };
-        LockError::Lost {
-            host: self.host.clone(),
-            status,
+    /// Releases the lock by closing SSH standard input.
+    pub(crate) async fn release(self) -> Result<(), LockError> {
+        let Self {
+            mut child,
+            stdin,
             stderr,
-        }
-    }
-
-    /// Releases the lease by closing SSH standard input.
-    pub(crate) async fn release(mut self) -> Result<(), LockError> {
-        self.stdin.take();
-        let status = match tokio::time::timeout(RELEASE_TIMEOUT, self.child.wait()).await {
+            host,
+        } = self;
+        drop(stdin);
+        let status = match tokio::time::timeout(RELEASE_TIMEOUT, child.wait()).await {
             Ok(Ok(status)) => status,
-            Ok(Err(source)) => {
-                return Err(LockError::Release {
-                    host: self.host.clone(),
-                    source,
-                });
-            }
+            Ok(Err(source)) => return Err(LockError::Release { host, source }),
             Err(_) => {
-                terminate(&mut self.child).await;
-                return Err(LockError::ReleaseTimedOut {
-                    host: self.host.clone(),
-                });
+                terminate(&mut child).await;
+                return Err(LockError::ReleaseTimedOut { host });
             }
         };
-        let stderr = match self.stderr.take() {
-            Some(stderr) => stderr_text(stderr, &self.host).await?,
-            None => String::new(),
-        };
+        let stderr = stderr_text(stderr, &host).await?;
         if status.success() {
             Ok(())
         } else {
             Err(LockError::ReleaseFailed {
-                host: self.host.clone(),
+                host,
                 status,
                 stderr,
             })
@@ -304,7 +269,7 @@ async fn stderr_text(
     })
 }
 
-/// Best-effort terminates a lease process after a lifecycle failure.
+/// Best-effort terminates a lock process after a lifecycle failure.
 async fn terminate(child: &mut Child) {
     let _ = child.kill().await;
 }
@@ -314,9 +279,9 @@ mod tests {
     use tempfile::tempdir;
     use tokio::process::Command;
 
-    use super::{ACQUIRED, DeploymentLease, LockError};
+    use super::{ACQUIRED, DeploymentLock, LockError};
 
-    /// Creates a local lease command using the production acknowledgement protocol.
+    /// Creates a local lock command using the production acknowledgement protocol.
     fn command(path: &std::path::Path) -> Command {
         let mut command = Command::new("flock");
         command
@@ -333,21 +298,21 @@ mod tests {
 
     /// Checks exclusive acquisition, conflict reporting, and release through EOF.
     #[tokio::test]
-    async fn leases_are_exclusive_and_release_on_stdin_eof() {
+    async fn locks_are_exclusive_and_release_on_stdin_eof() {
         let directory = tempdir().expect("temporary directory should be created");
         let path = directory.path().join("deployment.lock");
-        let first = DeploymentLease::spawn("test", command(&path))
+        let first = DeploymentLock::spawn("test", command(&path))
             .await
-            .expect("first lease should be acquired");
-        let conflict = DeploymentLease::spawn("test", command(&path)).await;
+            .expect("first lock should be acquired");
+        let conflict = DeploymentLock::spawn("test", command(&path)).await;
         assert!(matches!(conflict, Err(LockError::Unavailable { .. })));
 
-        first.release().await.expect("lease should be released");
-        DeploymentLease::spawn("test", command(&path))
+        first.release().await.expect("lock should be released");
+        DeploymentLock::spawn("test", command(&path))
             .await
-            .expect("released lease should be acquirable")
+            .expect("released lock should be acquirable")
             .release()
             .await
-            .expect("second lease should be released");
+            .expect("second lock should be released");
     }
 }

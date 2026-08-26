@@ -126,25 +126,12 @@ impl<'a> ProcessContext<'a> {
         Self { logs, cancellation }
     }
 
-    /// Creates subprocess services with child-scoped cancellation.
-    pub(crate) fn child(&self) -> Self {
-        Self {
-            logs: self.logs,
-            cancellation: self.cancellation.child_token(),
-        }
-    }
-
     /// Creates subprocess services isolated from workflow cancellation for bounded recovery.
     pub(crate) fn recovery(&self) -> Self {
         Self {
             logs: self.logs,
             cancellation: CancellationToken::new(),
         }
-    }
-
-    /// Cancels commands using this context without cancelling its parent.
-    pub(crate) fn cancel(&self) {
-        self.cancellation.cancel();
     }
 }
 

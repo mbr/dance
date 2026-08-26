@@ -1,22 +1,22 @@
-//! Lease-protected deployment state machine for one reviewed host.
+//! Lock-protected deployment state machine for one reviewed host.
 
 use indicatif::ProgressBar;
 
 use super::{ActivationOptions, operations, review::ReviewedHost, rollback};
 use crate::{
     error::Error,
-    lock::DeploymentLease,
+    lock::DeploymentLock,
     process::ProcessContext,
     status::{self, DeploymentPhase},
     verification,
 };
 
-/// Owns a reviewed host and its acquired deployment lease.
+/// Owns a reviewed host and its acquired deployment lock.
 pub(super) struct LockedHost {
     /// Contains the reviewed host state.
     reviewed: ReviewedHost,
     /// Guards the host against overlapping deployment.
-    lease: DeploymentLease,
+    lock: DeploymentLock,
 }
 
 /// Owns a locked host whose active system was revalidated.
@@ -24,7 +24,7 @@ pub(super) struct ValidatedHost {
     /// Contains the reviewed host state.
     reviewed: ReviewedHost,
     /// Guards the host throughout activation and recovery.
-    lease: DeploymentLease,
+    lock: DeploymentLock,
 }
 
 /// Describes the result of one host deployment.
@@ -39,8 +39,8 @@ pub(super) enum Outcome {
     RecoveryRequired(Error),
     /// The host was activated but could not be cleaned.
     CleanupFailed(Error),
-    /// The host was activated but its deployment lease could not be released cleanly.
-    LeaseReleaseFailed(Error),
+    /// The host was activated but its deployment lock could not be released cleanly.
+    LockReleaseFailed(Error),
 }
 
 impl Outcome {
@@ -52,7 +52,7 @@ impl Outcome {
             Self::Failed(_)
             | Self::RolledBack(_)
             | Self::CleanupFailed(_)
-            | Self::LeaseReleaseFailed(_) => {
+            | Self::LockReleaseFailed(_) => {
                 status::fail(progress);
             }
         }
@@ -60,39 +60,26 @@ impl Outcome {
 }
 
 impl LockedHost {
-    /// Acquires the reviewed host's deployment lease.
+    /// Acquires the reviewed host's deployment lock.
     pub(super) async fn acquire(
         reviewed: ReviewedHost,
         progress: &ProgressBar,
     ) -> Result<Self, Error> {
         status::set_phase(progress, reviewed.id(), DeploymentPhase::Locking);
-        let lease = DeploymentLease::acquire(reviewed.id(), &reviewed.host.ssh_url())
+        let lock = DeploymentLock::acquire(reviewed.id(), &reviewed.host.ssh_url())
             .await
             .map_err(Error::Lock)?;
-        Ok(Self { reviewed, lease })
+        Ok(Self { reviewed, lock })
     }
 
-    /// Revalidates the active system while monitoring lease loss.
+    /// Revalidates the active system while holding the deployment lock.
     pub(super) async fn revalidate(
-        mut self,
+        self,
         processes: &ProcessContext<'_>,
         progress: &ProgressBar,
     ) -> Result<ValidatedHost, Error> {
-        let host_processes = processes.child();
-        let active = {
-            let validation =
-                operations::deployed_store_path(&self.reviewed.host, &host_processes, progress);
-            tokio::pin!(validation);
-            tokio::select! {
-                biased;
-                error = self.lease.lost() => {
-                    host_processes.cancel();
-                    let _ = validation.await;
-                    return Err(Error::Lock(error));
-                }
-                active = &mut validation => active,
-            }
-        };
+        let active =
+            operations::deployed_store_path(&self.reviewed.host, processes, progress).await;
         let active = match active {
             Ok(active) => active,
             Err(error) => {
@@ -111,72 +98,57 @@ impl LockedHost {
         }
         Ok(ValidatedHost {
             reviewed: self.reviewed,
-            lease: self.lease,
+            lock: self.lock,
         })
     }
 
-    /// Releases a lease after fleet-level work is abandoned.
+    /// Releases a lock after fleet-level work is abandoned.
     pub(super) async fn abandon(self) {
-        release_abandoned(&self.reviewed, self.lease).await;
+        release_abandoned(&self.reviewed, self.lock).await;
     }
 }
 
 impl ValidatedHost {
-    /// Runs activation and recovery while owning the host lease.
+    /// Runs activation and recovery while owning the host lock.
     pub(super) async fn activate(
         self,
         options: ActivationOptions,
         processes: &ProcessContext<'_>,
         progress: &ProgressBar,
     ) -> Outcome {
-        let Self {
-            reviewed,
-            mut lease,
-        } = self;
-        let host_processes = processes.child();
-        let deployment = run_activation(&reviewed, options, &host_processes, progress);
-        tokio::pin!(deployment);
-        let outcome = tokio::select! {
-            biased;
-            error = lease.lost() => {
-                host_processes.cancel();
-                let _ = deployment.await;
-                Outcome::RecoveryRequired(Error::Lock(error))
+        let Self { reviewed, lock } = self;
+        let outcome = run_activation(&reviewed, options, processes, progress).await;
+        let outcome = match lock.release().await {
+            Ok(()) => outcome,
+            Err(error) if matches!(outcome, Outcome::Activated) => {
+                Outcome::LockReleaseFailed(Error::Lock(error))
             }
-            outcome = &mut deployment => {
-                match lease.release().await {
-                    Ok(()) => outcome,
-                    Err(error) if matches!(outcome, Outcome::Activated) => {
-                        Outcome::LeaseReleaseFailed(Error::Lock(error))
-                    }
-                    Err(error) => {
-                        tracing::warn!(
-                            host = reviewed.id(),
-                            error = %error,
-                            "failed to release deployment lease",
-                        );
-                        outcome
-                    }
-                }
+            Err(error) => {
+                tracing::warn!(
+                    host = reviewed.id(),
+                    error = %error,
+                    "failed to release deployment lock",
+                );
+                outcome
             }
         };
         outcome.finish_progress(reviewed.id(), progress);
         outcome
     }
 
-    /// Releases a validated lease when another host prevents activation.
+    /// Releases a validated lock when another host prevents activation.
     pub(super) async fn abandon(self) {
-        release_abandoned(&self.reviewed, self.lease).await;
+        release_abandoned(&self.reviewed, self.lock).await;
     }
 }
 
-/// Releases an abandoned lease without replacing the primary fleet error.
-async fn release_abandoned(reviewed: &ReviewedHost, lease: DeploymentLease) {
-    if let Err(error) = lease.release().await {
+/// Releases an abandoned lock without replacing the primary fleet error.
+async fn release_abandoned(reviewed: &ReviewedHost, lock: DeploymentLock) {
+    if let Err(error) = lock.release().await {
         tracing::warn!(
             host = reviewed.id(),
             error = %error,
-            "failed to release abandoned deployment lease",
+            "failed to release abandoned deployment lock",
         );
     }
 }

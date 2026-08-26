@@ -55,7 +55,7 @@ pub(crate) enum Error {
     /// Indicates that an inventory operation failed.
     #[error(transparent)]
     Inventory(InventoryError),
-    /// Indicates that a deployment lease operation failed.
+    /// Indicates that a deployment lock operation failed.
     #[error(transparent)]
     Lock(LockError),
     /// Indicates that a host changed after deployment review.
@@ -67,7 +67,7 @@ pub(crate) enum Error {
         host: String,
         /// Identifies the system observed during review.
         reviewed: StorePath,
-        /// Identifies the system observed under the deployment lease.
+        /// Identifies the system observed under the deployment lock.
         active: StorePath,
     },
     /// Indicates that automatic commits require a tracked lock file.

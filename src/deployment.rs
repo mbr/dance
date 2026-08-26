@@ -75,8 +75,8 @@ struct ActivationSummary {
     recovery_required: usize,
     /// Counts successful activations whose cleanup failed.
     cleanup_failed: usize,
-    /// Counts successful activations whose lease release failed.
-    lease_release_failed: usize,
+    /// Counts successful activations whose lock release failed.
+    lock_release_failed: usize,
     /// Retains the first deployment error.
     first_error: Option<Error>,
 }
@@ -106,9 +106,9 @@ impl ActivationSummary {
                 self.cleanup_failed += 1;
                 error
             }
-            HostOutcome::LeaseReleaseFailed(error) => {
+            HostOutcome::LockReleaseFailed(error) => {
                 self.activated += 1;
-                self.lease_release_failed += 1;
+                self.lock_release_failed += 1;
                 error
             }
         };
@@ -132,7 +132,7 @@ impl Display for ActivationSummary {
             (self.rolled_back, "rolled back"),
             (self.recovery_required, "recovery required"),
             (self.cleanup_failed, "cleanup failed"),
-            (self.lease_release_failed, "lease release failed"),
+            (self.lock_release_failed, "lock release failed"),
         ] {
             if count != 0 {
                 write!(formatter, ", {count} {label}")?;
@@ -284,7 +284,7 @@ fn confirm() -> Result<bool, Error> {
         .map_err(|source| Error::Confirmation { source })
 }
 
-/// Acquires every host lease without beginning partial activation.
+/// Acquires every host lock without beginning partial activation.
 async fn acquire_hosts(
     reviewed: Vec<ReviewedHost>,
     progresses: &[indicatif::ProgressBar],
