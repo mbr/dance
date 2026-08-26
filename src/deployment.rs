@@ -89,24 +89,19 @@ pub(crate) async fn deploy(
         processes,
     )
     .await?;
+    if let Some(error) = first_error {
+        return Err(error);
+    }
     if outdated.is_empty() {
-        if let Some(error) = first_error {
-            return Err(error);
-        }
         return pending_updates.commit(processes).await;
     }
 
     if !options.approved && !confirm()? {
-        return first_error.map_or(Ok(()), Err);
+        return Ok(());
     }
 
-    let activation = activate(outdated, options.activation, processes).await;
-    let result = first_error.map_or(activation, Err);
-    if result.is_ok() {
-        pending_updates.commit(processes).await
-    } else {
-        result
-    }
+    activate(outdated, options.activation, processes).await?;
+    pending_updates.commit(processes).await
 }
 
 /// Collects and displays the active and desired state of selected hosts.
