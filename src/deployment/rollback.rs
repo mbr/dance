@@ -2,13 +2,8 @@
 
 use indicatif::ProgressBar;
 
-use super::operations::SSH_TIMEOUT;
-use crate::{
-    error::Error,
-    inventory::Host,
-    process::{Invocation, ProcessContext},
-    store_path::StorePath,
-};
+use super::operations::{self, SSH_TIMEOUT};
+use crate::{error::Error, inventory::Host, process::ProcessContext, store_path::StorePath};
 
 /// Selects whether restoration also repairs the persistent system profile.
 pub(super) enum Persistence {
@@ -29,13 +24,12 @@ pub(super) async fn restore(
     let action = match persistence {
         Persistence::Runtime => "test",
         Persistence::System => {
-            Invocation::new(
-                processes,
+            operations::ssh(
+                host,
                 format!("deploy-{}-rollback-profile", host.id()),
-                "ssh",
+                processes,
                 progress,
             )
-            .argument(host.ssh_url())
             .argument(previous.as_ref().join("sw/bin/nix-env"))
             .arguments(["--profile", "/nix/var/nix/profiles/system", "--set"])
             .argument(previous.as_ref())
@@ -46,13 +40,12 @@ pub(super) async fn restore(
         }
     };
 
-    Invocation::new(
-        processes,
+    operations::ssh(
+        host,
         format!("deploy-{}-rollback-activate", host.id()),
-        "ssh",
+        processes,
         progress,
     )
-    .argument(host.ssh_url())
     .argument(previous.as_ref().join("bin/switch-to-configuration"))
     .argument(action)
     .timeout(SSH_TIMEOUT)

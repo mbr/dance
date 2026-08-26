@@ -14,19 +14,28 @@ use crate::{
 /// Limits routine SSH operations.
 pub(super) const SSH_TIMEOUT: Duration = Duration::from_mins(1);
 
+/// Creates an SSH invocation targeting one inventory host.
+pub(super) fn ssh<'a>(
+    host: &Host,
+    label: impl Into<String>,
+    processes: &'a ProcessContext<'a>,
+    progress: &'a ProgressBar,
+) -> Invocation<'a> {
+    Invocation::new(processes, label, "ssh", progress).argument(host.ssh_url())
+}
+
 /// Reads the system currently activated on a target.
 pub(super) async fn deployed_store_path(
     host: &Host,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<StorePath, Error> {
-    let output = Invocation::new(
-        processes,
+    let output = ssh(
+        host,
         format!("review-{}-remote", host.id()),
-        "ssh",
+        processes,
         progress,
     )
-    .argument(host.ssh_url())
     .argument("readlink -f /run/current-system")
     .timeout(SSH_TIMEOUT)
     .output()
@@ -102,13 +111,12 @@ pub(super) async fn collect_garbage(
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
-    Invocation::new(
-        processes,
+    ssh(
+        host,
         format!("deploy-{}-prune-generations", host.id()),
-        "ssh",
+        processes,
         progress,
     )
-    .argument(host.ssh_url())
     .arguments([
         "nix-env",
         "--profile",
@@ -119,24 +127,22 @@ pub(super) async fn collect_garbage(
     .status()
     .await?;
 
-    Invocation::new(
-        processes,
+    ssh(
+        host,
         format!("deploy-{}-refresh-bootloader", host.id()),
-        "ssh",
+        processes,
         progress,
     )
-    .argument(host.ssh_url())
     .arguments(["/run/current-system/bin/switch-to-configuration", "boot"])
     .status()
     .await?;
 
-    Invocation::new(
-        processes,
+    ssh(
+        host,
         format!("deploy-{}-collect-garbage", host.id()),
-        "ssh",
+        processes,
         progress,
     )
-    .argument(host.ssh_url())
     .arguments(["nix-store", "--gc"])
     .status()
     .await
