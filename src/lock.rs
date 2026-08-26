@@ -1,4 +1,22 @@
 //! Remote deployment locks held through SSH.
+//!
+//! [`DeploymentLock::acquire`] starts an SSH process that takes a non-blocking `flock` on the
+//! target's `/run/lock/dance-deployment.lock`. The remote process acknowledges the lock before
+//! acquisition returns, so receiving a guard means no competing Dance process held the lock at
+//! that point. Contention is reported immediately as [`LockError::Unavailable`].
+//!
+//! The guard keeps the SSH process's standard input open for its lifetime:
+//!
+//! ```ignore
+//! let _lock = DeploymentLock::acquire(host.id(), &host.ssh_url()).await?;
+//! // Revalidate and modify the host while `_lock` remains in scope.
+//! ```
+//!
+//! Dropping the guard closes standard input and drops a kill-on-drop Tokio child. This initiates
+//! SSH shutdown without waiting for the local or remote process to exit. Dance does not reacquire a
+//! host lock within the same workflow, so it has no consuming asynchronous release operation. If a
+//! future caller needs to prove release before immediate reacquisition, that operation can close
+//! standard input and await the child explicitly; until then, scope-based release is sufficient.
 
 use std::{
     io,
@@ -79,10 +97,9 @@ pub(crate) enum LockError {
     },
 }
 
-/// Holds an exclusive deployment lock on one host.
+/// Guards one host against overlapping Dance deployments.
 ///
-/// Dropping the guard closes its input and drops the kill-on-drop SSH child, releasing the remote
-/// file lock.
+/// See the [module documentation](self) for acquisition and release semantics.
 pub(crate) struct DeploymentLock {
     /// Keeps the remote lock holder's standard input open until the guard is dropped.
     _stdin: ChildStdin,
