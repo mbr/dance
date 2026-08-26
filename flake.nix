@@ -60,7 +60,7 @@
 
             cargoLock.lockFile = ./Cargo.lock;
 
-            meta.mainProgram = pname;
+            meta.mainProgram = "dance";
           }
         );
 

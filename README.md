@@ -22,6 +22,30 @@ Dance keeps the complete `nixos-rebuild` operations and adds:
 - **Verification** of deployments: write a script to smoke-test a server, with automatic rollbacks on failure.
 - **No deployment state**: the active state comes from `/run/current-system`; the desired state comes from the flake. With a version-controlled `flake.lock` and inventory, Dance can run from any machine.
 
+## Installation
+
+Install the `dance` binary from crates.io:
+
+```console
+$ cargo install --locked dance-ops
+```
+
+Or try the latest source with Nix:
+
+```console
+$ nix shell github:mbr/dance
+$ dance --help
+```
+
+To include Dance in a flake, add it as an input and use its default package:
+
+```nix
+inputs.dance.url = "github:mbr/dance";
+
+# With `dance` and `pkgs` in scope:
+environment.systemPackages = [ dance.packages.${pkgs.system}.default ];
+```
+
 ## Writing an inventory file
 
 An inventory contains any number of hosts with three fields:
