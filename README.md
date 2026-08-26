@@ -6,7 +6,7 @@
 nixos-rebuild switch --use-substitutes --flake .#web-server --target-host root@example.com
 ```
 
-`dance` wraps this in a nice utility to make it more comfortable:
+`dance` adds a few conveniences around doing this for a group of servers:
 
 [![Dance deploying ten NixOS servers](docs/dance-deployment.gif)](https://asciinema.org/a/sSUw7XPxkSdJvDgL)
 
