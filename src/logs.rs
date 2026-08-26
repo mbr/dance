@@ -53,9 +53,9 @@ pub(crate) enum LogMode {
 
 /// Owns one diagnostic log file and its path.
 pub(crate) struct LogFile {
-    /// Locates the output file for error reporting.
+    /// Locates the file for error reporting.
     path: PathBuf,
-    /// Receives subprocess output bytes.
+    /// Receives diagnostic bytes.
     file: File,
 }
 
@@ -73,7 +73,7 @@ impl LogFile {
         self.file
     }
 
-    /// Writes output bytes to the diagnostic file.
+    /// Writes bytes to the diagnostic file.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), LogError> {
         self.file
             .write_all(bytes)
