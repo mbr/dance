@@ -5,7 +5,7 @@ A tool for deploying servers with `nixos-rebuild`. Everything you wished your pe
 At its core, Dance takes servers defined in local Nix flakes and deploys them over SSH. A flake can define one server or several related servers. A few conveniences come with that:
 
 - An inventory keeps short server IDs and SSH addresses in one place.
-- Status checks and deployments run in parallel across multiple servers.
+- Status checks and deployments run independently and in parallel across multiple servers.
 - `--update` updates the inputs of all selected flakes before comparison.
 - `nixos-rebuild test` builds, uploads, and temporarily activates each approved system before it becomes a boot generation.
 - Flake verifiers are built before activation and can check a tested system externally or over SSH.
@@ -50,7 +50,9 @@ dance deploy --update --commit www # Commit the lock after successful deployment
 dance deploy --git www             # Shorthand for --update --commit
 ```
 
-Dance asks for confirmation, builds every configured verifier, temporarily activates each system with `nixos-rebuild test`, runs its verifier, then makes a successful test persistent with `nixos-rebuild switch`. A failed test or verifier causes Dance to reactivate the system observed during review. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
+Dance asks for confirmation and then deploys each reviewed server independently. Each server is locked and revalidated before Dance builds its verifier, temporarily activates the system with `nixos-rebuild test`, runs the verifier, and makes a successful test persistent with `nixos-rebuild switch`. A failure on one server does not prevent unrelated servers from deploying.
+
+A failed test or verifier causes Dance to reactivate the system observed during review. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
 
 A deployment centers on these two commands:
 
@@ -68,7 +70,7 @@ With `--update --commit`, or its `--git` shorthand, Dance requires `flake.nix` a
 
 Editing `flake.nix`, `flake.lock`, or other flake source files while Dance is running is undefined behavior.
 
-Before activation, Dance acquires `/run/lock/dance-deployment.lock` through SSH and verifies that the reviewed system is still active. A deployment fails rather than waiting when another Dance process holds the host lock. Dance assumes an acquired lock's SSH process remains alive until release. The lock is advisory and does not prevent manual `nixos-rebuild` commands.
+Before preparing a server, Dance acquires `/run/lock/dance-deployment.lock` through SSH and verifies that the reviewed system is still active. That server's deployment fails rather than waiting when another Dance process holds its lock. Dance assumes an acquired lock's SSH process remains alive until release. The lock is advisory and does not prevent manual `nixos-rebuild` commands.
 
 Targets must be reachable through noninteractive SSH authentication. Dance disables password prompts and uses connection timeouts and keepalives for its SSH and `nixos-rebuild` operations. Deployments should have an out-of-band reboot path such as a hosting console.
 
