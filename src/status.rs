@@ -12,9 +12,6 @@ use crate::error::Error;
 
 /// Controls how often active spinners advance.
 const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
-/// Defines the layout of the information collection bar.
-const REVIEW_TEMPLATE: &str =
-    "{spinner} collecting info [{bar:20.cyan/blue}] {pos}/{len} {msg:.dim}";
 /// Defines the layout of a host status line.
 const HOST_TEMPLATE: &str = "{spinner} {prefix} {wide_msg}";
 /// Defines the smooth spinner animation and its blank final frame.
@@ -24,6 +21,10 @@ const SPINNER_TICKS: &str =
 /// Identifies a phase of host work.
 #[derive(Clone, Copy)]
 pub(crate) enum DeploymentPhase {
+    /// Updates local flake inputs.
+    UpdatingInputs,
+    /// Collects active and desired system state.
+    CheckingStatus,
     /// Acquires exclusive access and validates reviewed state.
     Locking,
     /// Builds and temporarily activates the desired system.
@@ -45,7 +46,11 @@ impl DeploymentPhase {
     fn style(self) -> Style {
         let style = Style::new().for_stderr();
         match self {
-            Self::Locking | Self::Testing | Self::BuildingVerifier => style.blue(),
+            Self::UpdatingInputs
+            | Self::CheckingStatus
+            | Self::Locking
+            | Self::Testing
+            | Self::BuildingVerifier => style.blue(),
             Self::RunningVerifier | Self::CollectingGarbage => style.yellow(),
             Self::Switching => style.magenta(),
             Self::RollingBack => style.red(),
@@ -56,6 +61,8 @@ impl DeploymentPhase {
 impl Display for DeploymentPhase {
     fn fmt(&self, formatter: &mut Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
+            Self::UpdatingInputs => "updating inputs",
+            Self::CheckingStatus => "checking status",
             Self::Locking => "locking",
             Self::Testing => "testing",
             Self::BuildingVerifier => "building verifier",
@@ -72,23 +79,6 @@ fn spinner_style(template: &str) -> Result<ProgressStyle, Error> {
     Ok(ProgressStyle::with_template(template)
         .map_err(|source| Error::ProgressStyle { source })?
         .tick_chars(SPINNER_TICKS))
-}
-
-/// Creates a progress bar for host review steps.
-pub(crate) fn review(
-    host_count: usize,
-    update: bool,
-    validate: bool,
-) -> Result<ProgressBar, Error> {
-    let host_count = u64::try_from(host_count).expect("host count should fit in u64");
-    let steps_per_host = 2 + u64::from(update) + u64::from(validate);
-    let length = host_count
-        .checked_mul(steps_per_host)
-        .expect("review step count should fit in u64");
-    let style = spinner_style(REVIEW_TEMPLATE)?.progress_chars("=>-");
-    let progress = ProgressBar::new(length).with_style(style);
-    progress.enable_steady_tick(SPINNER_INTERVAL);
-    Ok(progress)
 }
 
 /// Displays a host identity and status using distinct styles.

@@ -22,7 +22,7 @@ use self::{
 use crate::{
     error::Error,
     git::PendingUpdates,
-    inventory::Inventory,
+    inventory::{Host, Inventory},
     process::ProcessContext,
     status::{self, ProgressDisplay},
     update::{self, UpdateOutcome},
@@ -199,35 +199,58 @@ async fn collect(
 ) -> Result<ReviewResult, Error> {
     let flakes = inventory.flake_groups();
     let hosts = inventory.into_iter().collect::<Vec<_>>();
-    let progress = status::review(hosts.len(), update_flakes, validate_current)?;
+    let display = ProgressDisplay::new()?;
+    let progresses = display.hosts(hosts.iter().map(Host::id));
+    let initial_phase = if update_flakes {
+        status::DeploymentPhase::UpdatingInputs
+    } else {
+        status::DeploymentPhase::CheckingStatus
+    };
+    for (host, progress) in hosts.iter().zip(&progresses) {
+        status::set_phase(progress, host.id(), initial_phase);
+    }
+    let flakes = flakes
+        .into_iter()
+        .map(|(path, _)| {
+            let dependent = hosts
+                .iter()
+                .zip(&progresses)
+                .filter(|(host, _)| host.flake_path() == path.as_path())
+                .map(|(_, progress)| progress.clone())
+                .collect();
+            (path, dependent)
+        })
+        .collect();
 
     let deployed = join_all(
         hosts
             .iter()
-            .map(|host| review::deployed(host, processes, &progress)),
+            .zip(&progresses)
+            .map(|(host, progress)| review::deployed(host, processes, progress)),
     );
     let local = async {
         let updates = if update_flakes {
-            update::flakes(flakes, commit_flakes, processes, &progress).await
+            update::flakes(flakes, commit_flakes, processes).await
         } else {
             UpdateOutcome::default()
         };
-        let expected = join_all(hosts.iter().map(|host| async {
+        let expected = join_all(hosts.iter().zip(&progresses).map(|(host, progress)| async {
             if updates.failed(host.flake_path()) {
-                review::skip_expected(host, &progress);
+                review::skip_expected(progress);
                 None
             } else {
-                Some(review::expected(host, processes, &progress).await)
+                status::set_phase(progress, host.id(), status::DeploymentPhase::CheckingStatus);
+                Some(review::expected(host, processes, progress).await)
             }
         }));
         let validity = async {
             if validate_current {
-                join_all(hosts.iter().map(|host| async {
+                join_all(hosts.iter().zip(&progresses).map(|(host, progress)| async {
                     if updates.failed(host.flake_path()) {
-                        review::skip_validity(host, &progress);
+                        review::skip_validity(progress);
                         None
                     } else {
-                        Some(review::validity(host, processes, &progress).await)
+                        Some(review::validity(host, processes, progress).await)
                     }
                 }))
                 .await
@@ -285,7 +308,9 @@ async fn collect(
         }
     }
 
-    progress.finish_and_clear();
+    for progress in progresses {
+        progress.finish_and_clear();
+    }
     rows.sort_by_key(HostRow::needs_activation);
     if io::stdout().is_terminal() {
         println!("{}", Table::new(rows));

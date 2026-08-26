@@ -12,6 +12,7 @@ use crate::{
     error::Error,
     inventory::Host,
     process::ProcessContext,
+    status::{self, DeploymentPhase},
     store_path::StorePath,
     verification::{self, ConfiguredOutcome},
 };
@@ -141,10 +142,9 @@ impl ReviewedHost {
     }
 }
 
-/// Advances information collection after a local or remote step finishes.
+/// Reports information collection after a local or remote step finishes.
 async fn collect_step<T, E>(
     progress: &ProgressBar,
-    id: &str,
     source: &str,
     step: impl Future<Output = Result<T, E>>,
 ) -> Result<T, E> {
@@ -154,8 +154,7 @@ async fn collect_step<T, E>(
     } else {
         "failed"
     };
-    progress.set_message(format!("{id}: {source} info {status}"));
-    progress.inc(1);
+    progress.set_message(format!("{source} info {status}"));
     result
 }
 
@@ -167,7 +166,6 @@ pub(super) async fn deployed(
 ) -> Result<StorePath, Error> {
     collect_step(
         progress,
-        host.id(),
         "remote",
         operations::deployed_store_path(host, processes, progress),
     )
@@ -182,7 +180,6 @@ pub(super) async fn expected(
 ) -> Result<StorePath, Error> {
     collect_step(
         progress,
-        host.id(),
         "local",
         operations::expected_store_path(host, processes, progress),
     )
@@ -195,25 +192,25 @@ pub(super) async fn validity(
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<ConfiguredOutcome, Error> {
-    collect_step(
-        progress,
-        host.id(),
-        "validation",
-        verification::check_configured(host, processes, progress),
-    )
-    .await
+    let result = verification::run_configured(host, processes, progress).await;
+    status::set_phase(progress, host.id(), DeploymentPhase::CheckingStatus);
+    let status = if result.is_ok() {
+        "collected"
+    } else {
+        "failed"
+    };
+    progress.set_message(format!("validation info {status}"));
+    result
 }
 
 /// Completes the local collection step after a flake update failure.
-pub(super) fn skip_expected(host: &Host, progress: &ProgressBar) {
-    progress.set_message(format!("{}: local info skipped", host.id()));
-    progress.inc(1);
+pub(super) fn skip_expected(progress: &ProgressBar) {
+    progress.set_message("local info skipped");
 }
 
 /// Completes the validation step after a flake update failure.
-pub(super) fn skip_validity(host: &Host, progress: &ProgressBar) {
-    progress.set_message(format!("{}: validation skipped", host.id()));
-    progress.inc(1);
+pub(super) fn skip_validity(progress: &ProgressBar) {
+    progress.set_message("validation skipped");
 }
 
 /// Compares the deployed and expected systems for one host.

@@ -199,19 +199,6 @@ pub(crate) async fn run_configured(
     Ok(ConfiguredOutcome::Verified)
 }
 
-/// Builds and runs the configured verifier without changing a shared progress phase.
-pub(crate) async fn check_configured(
-    host: &Host,
-    processes: &ProcessContext<'_>,
-    progress: &ProgressBar,
-) -> Result<ConfiguredOutcome, Error> {
-    let Some(verifier) = PreparedVerifier::prepare(host, processes, progress).await? else {
-        return Ok(ConfiguredOutcome::Missing);
-    };
-    verifier.run(host, processes, progress).await?;
-    Ok(ConfiguredOutcome::Verified)
-}
-
 /// Describes one host's standalone verification result.
 enum Outcome {
     /// The configured verifier succeeded.

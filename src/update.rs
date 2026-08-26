@@ -37,14 +37,16 @@ impl UpdateOutcome {
     }
 }
 
-/// Updates one flake and advances every host that depends on it.
+/// Updates one flake and reports the result on each dependent host.
 async fn flake(
     path: PathBuf,
-    host_count: usize,
+    progresses: Vec<ProgressBar>,
     repository: Option<FlakeRepository>,
     processes: &ProcessContext<'_>,
-    progress: &ProgressBar,
 ) -> (PathBuf, Result<Option<PendingLock>, Error>) {
+    let progress = progresses
+        .first()
+        .expect("each selected flake should have a host progress bar");
     let result = Invocation::new(
         processes,
         format!("update-{}", path.display()),
@@ -61,22 +63,25 @@ async fn flake(
         (Err(error), _) => Err(error),
     };
     let status = if result.is_ok() { "updated" } else { "failed" };
-    progress.set_message(format!("{}: inputs {status}", path.display()));
-    progress.inc(u64::try_from(host_count).expect("host count should fit in u64"));
+    for progress in progresses {
+        progress.set_message(format!("inputs {status}"));
+    }
     (path, result)
 }
 
 /// Updates distinct flakes concurrently and collects their failures.
 pub(crate) async fn flakes(
-    flakes: Vec<(PathBuf, usize)>,
+    flakes: Vec<(PathBuf, Vec<ProgressBar>)>,
     commit: bool,
     processes: &ProcessContext<'_>,
-    progress: &ProgressBar,
 ) -> UpdateOutcome {
     let updates = if commit {
-        let prepared = join_all(flakes.into_iter().map(|(path, host_count)| async move {
+        let prepared = join_all(flakes.into_iter().map(|(path, progresses)| async move {
+            let progress = progresses
+                .first()
+                .expect("each selected flake should have a host progress bar");
             let repository = FlakeRepository::prepare(&path, processes, progress).await;
-            (path, host_count, repository)
+            (path, progresses, repository)
         }))
         .await;
         if prepared
@@ -84,33 +89,36 @@ pub(crate) async fn flakes(
             .any(|(_, _, repository)| repository.is_err())
         {
             let mut outcome = UpdateOutcome::default();
-            for (path, host_count, repository) in prepared {
+            for (path, progresses, repository) in prepared {
                 if let Err(error) = repository {
                     outcome.first_error.get_or_insert(error);
                 }
-                progress.set_message(format!("{}: update preflight failed", path.display()));
-                progress.inc(u64::try_from(host_count).expect("host count should fit in u64"));
+                for progress in progresses {
+                    progress.set_message("update preflight failed");
+                }
                 outcome.failed.insert(path);
             }
             return outcome;
         }
         prepared
             .into_iter()
-            .filter_map(|(path, host_count, repository)| {
+            .filter_map(|(path, progresses, repository)| {
                 repository
                     .ok()
-                    .map(|repository| (path, host_count, Some(repository)))
+                    .map(|repository| (path, progresses, Some(repository)))
             })
             .collect::<Vec<_>>()
     } else {
         flakes
             .into_iter()
-            .map(|(path, host_count)| (path, host_count, None))
+            .map(|(path, progresses)| (path, progresses, None))
             .collect()
     };
-    let results = join_all(updates.into_iter().map(|(path, host_count, repository)| {
-        flake(path, host_count, repository, processes, progress)
-    }))
+    let results = join_all(
+        updates
+            .into_iter()
+            .map(|(path, progresses, repository)| flake(path, progresses, repository, processes)),
+    )
     .await;
     let mut outcome = UpdateOutcome::default();
 
