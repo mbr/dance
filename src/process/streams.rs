@@ -32,7 +32,7 @@ use tokio_process_tools::{
     StreamVisitor,
 };
 
-use super::ProcessError;
+use super::{CommandError, ProcessError};
 use crate::{
     error::Error,
     logs::{LogError, LogFile, OutputLogs},
@@ -212,10 +212,10 @@ where
 
 /// Wraps an output consumer failure with command context.
 fn output_read_error(command: &str, source: tokio_process_tools::ConsumerError) -> Error {
-    Error::Process(ProcessError::OutputRead {
-        command: command.to_owned(),
+    Error::Process(ProcessError::OutputRead(CommandError::new(
+        command.to_owned(),
         source,
-    })
+    )))
 }
 
 /// Displays the latest output retained for progress reporting.

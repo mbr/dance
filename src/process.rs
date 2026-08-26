@@ -3,7 +3,8 @@
 mod streams;
 
 use std::{
-    ffi::OsString, future::IntoFuture, process::ExitStatus, string::FromUtf8Error, time::Duration,
+    error::Error as StdError, ffi::OsString, future::IntoFuture, process::ExitStatus,
+    string::FromUtf8Error, time::Duration,
 };
 
 use indicatif::ProgressBar;
@@ -21,45 +22,45 @@ use crate::{
     logs::{CommandLog, CommandLogs, LogSession},
 };
 
+/// Associates a failure with the command that encountered it.
+#[derive(Debug, Error)]
+#[error("`{command}` failed")]
+pub(crate) struct CommandError<E>
+where
+    E: StdError + 'static,
+{
+    /// Shows the attempted command.
+    command: String,
+    /// Contains the underlying error.
+    #[source]
+    source: E,
+}
+
+impl<E> CommandError<E>
+where
+    E: StdError + 'static,
+{
+    /// Associates a failure with its command.
+    fn new(command: String, source: E) -> Self {
+        Self { command, source }
+    }
+}
+
 /// Describes a failure encountered while running a subprocess.
 #[derive(Debug, Error)]
 pub(crate) enum ProcessError {
     /// Indicates that a command could not be started.
-    #[error("failed to run `{command}`")]
-    Spawn {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the process creation error.
-        #[source]
-        source: SpawnError,
-    },
+    #[error("failed to run command")]
+    Spawn(#[source] CommandError<SpawnError>),
     /// Indicates that a command could not be awaited or cleaned up.
-    #[error("failed to wait for `{command}`")]
-    Wait {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the process lifecycle error.
-        #[source]
-        source: WaitOrTerminateError,
-    },
+    #[error("failed to wait for command")]
+    Wait(#[source] CommandError<WaitOrTerminateError>),
     /// Indicates that a command could not be terminated after interruption.
-    #[error("failed to terminate `{command}`")]
-    Terminate {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the process termination error.
-        #[source]
-        source: TerminationError,
-    },
+    #[error("failed to terminate command")]
+    Terminate(#[source] CommandError<TerminationError>),
     /// Indicates that command output could not be read.
-    #[error("failed to read output from `{command}`")]
-    OutputRead {
-        /// Shows the attempted command.
-        command: String,
-        /// Contains the output consumer error.
-        #[source]
-        source: ConsumerError,
-    },
+    #[error("failed to read command output")]
+    OutputRead(#[source] CommandError<ConsumerError>),
     /// Indicates that command output did not close after process exit.
     #[error("output from `{command}` did not close after {seconds} seconds")]
     OutputDrainTimedOut {
@@ -295,10 +296,10 @@ impl<'a> Invocation<'a> {
             Err(source) => {
                 return fail_command(
                     command_log,
-                    Error::Process(ProcessError::Spawn {
-                        command: command_display,
+                    Error::Process(ProcessError::Spawn(CommandError::new(
+                        command_display,
                         source,
-                    }),
+                    ))),
                 );
             }
         };
@@ -336,10 +337,10 @@ impl<'a> Invocation<'a> {
                 process.must_not_be_terminated();
                 return fail_command(
                     command_log,
-                    Error::Process(ProcessError::Wait {
-                        command: command_display,
+                    Error::Process(ProcessError::Wait(CommandError::new(
+                        command_display,
                         source,
-                    }),
+                    ))),
                 );
             }
             None => match process
@@ -356,10 +357,10 @@ impl<'a> Invocation<'a> {
                     process.must_not_be_terminated();
                     return fail_command(
                         command_log,
-                        Error::Process(ProcessError::Terminate {
-                            command: command_display,
+                        Error::Process(ProcessError::Terminate(CommandError::new(
+                            command_display,
                             source,
-                        }),
+                        ))),
                     );
                 }
             },
