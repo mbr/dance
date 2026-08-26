@@ -114,3 +114,7 @@ dance verify www
 ## Logs
 
 Dance keeps command output under `$XDG_STATE_HOME/dance/logs` when a run fails, falling back to `~/.local/state/dance/logs` when `XDG_STATE_HOME` is unset. Each retained run contains a `run.log` tracing log and numbered raw output streams for its commands.
+
+## LLM friendliness
+
+`dance` is pretty to look at with statusbars, but has also been optimized to make outcomes and potential problems easily discoverable, it will output sucess and failures sparsely when not run in a terminal, and provide paths where logs can be found.
