@@ -73,42 +73,44 @@ pub(crate) async fn flakes(
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> UpdateOutcome {
-    let repositories = if commit {
-        let prepared = join_all(
-            flakes
-                .iter()
-                .map(|(path, _)| FlakeRepository::prepare(path, processes, progress)),
-        )
+    let updates = if commit {
+        let prepared = join_all(flakes.into_iter().map(|(path, host_count)| async move {
+            let repository = FlakeRepository::prepare(&path, processes, progress).await;
+            (path, host_count, repository)
+        }))
         .await;
-        let mut repositories = Vec::with_capacity(prepared.len());
-        let mut first_error = None;
-        for repository in prepared {
-            match repository {
-                Ok(repository) => repositories.push(repository),
-                Err(error) => {
-                    first_error.get_or_insert(error);
+        if prepared
+            .iter()
+            .any(|(_, _, repository)| repository.is_err())
+        {
+            let mut outcome = UpdateOutcome::default();
+            for (path, host_count, repository) in prepared {
+                if let Err(error) = repository {
+                    outcome.first_error.get_or_insert(error);
                 }
-            }
-        }
-        if let Some(error) = first_error {
-            let mut outcome = UpdateOutcome {
-                first_error: Some(error),
-                ..UpdateOutcome::default()
-            };
-            for (path, host_count) in flakes {
                 progress.set_message(format!("{}: update preflight failed", path.display()));
                 progress.inc(u64::try_from(host_count).expect("host count should fit in u64"));
                 outcome.failed.insert(path);
             }
             return outcome;
         }
-        repositories.into_iter().map(Some).collect::<Vec<_>>()
+        prepared
+            .into_iter()
+            .filter_map(|(path, host_count, repository)| {
+                repository
+                    .ok()
+                    .map(|repository| (path, host_count, Some(repository)))
+            })
+            .collect::<Vec<_>>()
     } else {
-        (0..flakes.len()).map(|_| None).collect()
+        flakes
+            .into_iter()
+            .map(|(path, host_count)| (path, host_count, None))
+            .collect()
     };
-    let results = join_all(flakes.into_iter().zip(repositories).map(
-        |((path, host_count), repository)| flake(path, host_count, repository, processes, progress),
-    ))
+    let results = join_all(updates.into_iter().map(|(path, host_count, repository)| {
+        flake(path, host_count, repository, processes, progress)
+    }))
     .await;
     let mut outcome = UpdateOutcome::default();
 
