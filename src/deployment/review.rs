@@ -133,6 +133,8 @@ pub(super) struct ReviewedHost {
     pub(super) host: Host,
     /// Identifies the system observed during review.
     pub(super) deployed: StorePath,
+    /// Identifies the desired system observed during review.
+    pub(super) expected: StorePath,
 }
 
 impl ReviewedHost {
@@ -226,5 +228,12 @@ pub(super) fn review(
         return ReviewOutcome::UpToDate(row);
     }
 
-    ReviewOutcome::OutOfDate(row, ReviewedHost { host, deployed })
+    ReviewOutcome::OutOfDate(
+        row,
+        ReviewedHost {
+            host,
+            deployed,
+            expected: expected.clone(),
+        },
+    )
 }

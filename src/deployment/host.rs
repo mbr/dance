@@ -41,26 +41,25 @@ impl Outcome {
 /// Handles one failed deployment step according to the rollback policy.
 async fn fail(
     reviewed: &ReviewedHost,
-    options: HostOptions,
-    persistence: rollback::Persistence,
+    watchdog: Option<&rollback::Watchdog>,
     trigger: Error,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Outcome {
-    if !options.rollback {
+    let Some(watchdog) = watchdog else {
         return Outcome::Failed(trigger);
-    }
+    };
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::RollingBack);
     let recovery_processes = processes.recovery();
-    match rollback::restore(
-        &reviewed.host,
-        &reviewed.deployed,
-        persistence,
-        &recovery_processes,
-        progress,
-    )
-    .await
+    match watchdog
+        .restore(
+            &reviewed.host,
+            &reviewed.deployed,
+            &recovery_processes,
+            progress,
+        )
+        .await
     {
         Ok(()) => Outcome::RolledBack(trigger),
         Err(rollback) => Outcome::RecoveryRequired(Error::RollbackIncomplete {
@@ -106,45 +105,59 @@ pub(super) async fn deploy(
         None
     };
 
+    let watchdog = if options.rollback {
+        status::set_phase(progress, reviewed.id(), DeploymentPhase::Preparing);
+        if let Err(error) = operations::dry_activate(&reviewed.host, processes, progress).await {
+            return Outcome::Failed(error);
+        }
+
+        status::set_phase(progress, reviewed.id(), DeploymentPhase::ArmingRollback);
+        match rollback::Watchdog::arm(&reviewed.host, &reviewed.deployed, processes, progress).await
+        {
+            Ok(watchdog) => Some(watchdog),
+            Err(error) => return Outcome::Failed(error),
+        }
+    } else {
+        None
+    };
+
     status::set_phase(progress, reviewed.id(), DeploymentPhase::Testing);
     if let Err(error) = operations::test(&reviewed.host, processes, progress).await {
-        return fail(
-            &reviewed,
-            options,
-            rollback::Persistence::Runtime,
-            error,
-            processes,
-            progress,
-        )
-        .await;
+        return fail(&reviewed, watchdog.as_ref(), error, processes, progress).await;
     }
 
     if let Some(verifier) = &verifier {
         status::set_phase(progress, reviewed.id(), DeploymentPhase::RunningVerifier);
         if let Err(error) = verifier.run(&reviewed.host, processes, progress).await {
-            return fail(
-                &reviewed,
-                options,
-                rollback::Persistence::Runtime,
-                error,
-                processes,
-                progress,
-            )
-            .await;
+            return fail(&reviewed, watchdog.as_ref(), error, processes, progress).await;
         }
     }
 
     status::set_phase(progress, reviewed.id(), DeploymentPhase::Switching);
     if let Err(error) = operations::switch(&reviewed.host, processes, progress).await {
-        return fail(
-            &reviewed,
-            options,
-            rollback::Persistence::System,
-            error,
-            processes,
-            progress,
-        )
-        .await;
+        return fail(&reviewed, watchdog.as_ref(), error, processes, progress).await;
+    }
+
+    let active = match operations::deployed_store_path(&reviewed.host, processes, progress).await {
+        Ok(active) => active,
+        Err(error) => {
+            return fail(&reviewed, watchdog.as_ref(), error, processes, progress).await;
+        }
+    };
+    if active != reviewed.expected {
+        let error = Error::DeploymentMismatch {
+            host: reviewed.id().to_owned(),
+            expected: reviewed.expected.clone(),
+            active,
+        };
+        return fail(&reviewed, watchdog.as_ref(), error, processes, progress).await;
+    }
+
+    if let Some(watchdog) = &watchdog {
+        status::set_phase(progress, reviewed.id(), DeploymentPhase::DisarmingRollback);
+        if let Err(error) = watchdog.disarm(&reviewed.host, processes, progress).await {
+            return fail(&reviewed, Some(watchdog), error, processes, progress).await;
+        }
     }
 
     if let Some(keep_generations) = options.keep_generations {

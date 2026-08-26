@@ -1,54 +1,153 @@
-//! Best-effort restoration of the system reviewed before deployment.
+//! Target-side rollback watchdog management.
+
+use std::time::Duration;
 
 use indicatif::ProgressBar;
+use uuid::Uuid;
 
 use super::operations::{self, SSH_TIMEOUT};
 use crate::{error::Error, inventory::Host, process::ProcessContext, store_path::StorePath};
 
-/// Selects whether restoration also repairs the persistent system profile.
-pub(super) enum Persistence {
-    /// Leaves the already-correct profile and bootloader untouched.
-    Runtime,
-    /// Restores the profile after a failed persistent switch.
-    System,
+/// Bounds the activation and verification window after cache warming.
+const WATCHDOG_TIMEOUT: Duration = Duration::from_mins(6);
+
+/// Identifies one armed target-side rollback watchdog.
+///
+/// Dropping the handle intentionally leaves the target timer armed.
+#[must_use = "an armed rollback watchdog must be explicitly disarmed"]
+pub(super) struct Watchdog {
+    /// Contains the transient systemd unit stem.
+    unit: String,
 }
 
-/// Restores the reviewed system after a failed deployment step.
-pub(super) async fn restore(
-    host: &Host,
-    previous: &StorePath,
-    persistence: Persistence,
-    processes: &ProcessContext<'_>,
-    progress: &ProgressBar,
-) -> Result<(), Error> {
-    let action = match persistence {
-        Persistence::Runtime => "test",
-        Persistence::System => {
-            operations::ssh(
-                host,
-                format!("deploy-{}-rollback-profile", host.id()),
-                processes,
-                progress,
-            )
-            .argument(previous.as_ref().join("sw/bin/nix-env"))
-            .arguments(["--profile", "/nix/var/nix/profiles/system", "--set"])
-            .argument(previous.as_ref())
-            .timeout(SSH_TIMEOUT)
-            .status()
-            .await?;
-            "switch"
-        }
-    };
+impl Watchdog {
+    /// Arms a target-side watchdog for the reviewed system.
+    pub(super) async fn arm(
+        host: &Host,
+        previous: &StorePath,
+        processes: &ProcessContext<'_>,
+        progress: &ProgressBar,
+    ) -> Result<Self, Error> {
+        let unit = format!("dance-rollback-{}", Uuid::now_v7());
+        operations::ssh(
+            host,
+            format!("deploy-{}-arm-rollback", host.id()),
+            processes,
+            progress,
+        )
+        .argument(arm_command(&unit, previous))
+        .timeout(SSH_TIMEOUT)
+        .status()
+        .await?;
+        Ok(Self { unit })
+    }
 
-    operations::ssh(
-        host,
-        format!("deploy-{}-rollback-activate", host.id()),
-        processes,
-        progress,
+    /// Restores the reviewed system immediately and disarms the watchdog.
+    pub(super) async fn restore(
+        &self,
+        host: &Host,
+        previous: &StorePath,
+        processes: &ProcessContext<'_>,
+        progress: &ProgressBar,
+    ) -> Result<(), Error> {
+        operations::ssh(
+            host,
+            format!("deploy-{}-trigger-rollback", host.id()),
+            processes,
+            progress,
+        )
+        .argument(format!(
+            "systemctl start {}.service",
+            shell_quote(&self.unit)
+        ))
+        .timeout(SSH_TIMEOUT)
+        .status()
+        .await?;
+
+        let active = operations::deployed_store_path(host, processes, progress).await?;
+        if &active != previous {
+            return Err(Error::RollbackMismatch {
+                host: host.id().to_owned(),
+                expected: previous.clone(),
+                active,
+            });
+        }
+        self.disarm(host, processes, progress).await
+    }
+
+    /// Disarms a target-side watchdog after a conclusive outcome.
+    pub(super) async fn disarm(
+        &self,
+        host: &Host,
+        processes: &ProcessContext<'_>,
+        progress: &ProgressBar,
+    ) -> Result<(), Error> {
+        operations::ssh(
+            host,
+            format!("deploy-{}-disarm-rollback", host.id()),
+            processes,
+            progress,
+        )
+        .argument(format!("systemctl stop {}.timer", shell_quote(&self.unit)))
+        .timeout(SSH_TIMEOUT)
+        .status()
+        .await
+    }
+}
+
+/// Builds the command that creates a transient rollback timer.
+fn arm_command(unit: &str, previous: &StorePath) -> String {
+    let timeout = WATCHDOG_TIMEOUT.as_secs();
+    let rollback = rollback_command(previous);
+    format!(
+        "systemd-run --quiet --collect --unit={} --on-active={timeout}s --timer-property=AccuracySec=1s --property=Type=oneshot -- /bin/sh -c {}",
+        shell_quote(unit),
+        shell_quote(&rollback),
     )
-    .argument(previous.as_ref().join("bin/switch-to-configuration"))
-    .argument(action)
-    .timeout(SSH_TIMEOUT)
-    .status()
-    .await
+}
+
+/// Builds the command that restores a reviewed system persistently.
+fn rollback_command(previous: &StorePath) -> String {
+    let profile = previous.as_ref().join("sw/bin/nix-env");
+    let activate = previous.as_ref().join("bin/switch-to-configuration");
+    format!(
+        "{} --profile /nix/var/nix/profiles/system --set {} && {} switch",
+        shell_quote(&profile.to_string_lossy()),
+        shell_quote(&previous.to_string()),
+        shell_quote(&activate.to_string_lossy()),
+    )
+}
+
+/// Quotes one value for a POSIX-compatible remote shell.
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{arm_command, rollback_command, shell_quote};
+    use crate::store_path::StorePath;
+
+    /// Checks remote quoting and the complete target-side watchdog command.
+    #[test]
+    fn constructs_rollback_watchdogs() {
+        assert_eq!(shell_quote("one'two"), "'one'\"'\"'two'");
+
+        let path = "/nix/store/00000000000000000000000000000000-nixos-system-old";
+        let previous = path.parse::<StorePath>().expect("store path should parse");
+        let rollback = rollback_command(&previous);
+        assert_eq!(
+            rollback,
+            format!(
+                "'{path}/sw/bin/nix-env' --profile /nix/var/nix/profiles/system --set '{path}' && '{path}/bin/switch-to-configuration' switch"
+            )
+        );
+        assert_eq!(
+            arm_command("dance-rollback-test", &previous),
+            format!(
+                "systemd-run --quiet --collect --unit='dance-rollback-test' --on-active=360s --timer-property=AccuracySec=1s --property=Type=oneshot -- /bin/sh -c {}",
+                shell_quote(&rollback)
+            )
+        );
+    }
 }

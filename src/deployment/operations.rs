@@ -14,6 +14,8 @@ use crate::{
 
 /// Limits routine SSH operations.
 pub(super) const SSH_TIMEOUT: Duration = Duration::from_mins(1);
+/// Bounds rebuild actions performed while the rollback watchdog is armed.
+const REBUILD_TIMEOUT: Duration = Duration::from_mins(2);
 
 /// Creates an SSH invocation targeting one inventory host.
 pub(super) fn ssh<'a>(
@@ -67,13 +69,27 @@ pub(super) async fn expected_store_path(
     value.parse().map_err(Error::StorePath)
 }
 
+/// Builds and transfers a host configuration without activating it.
+pub(super) async fn dry_activate(
+    host: &Host,
+    processes: &ProcessContext<'_>,
+    progress: &ProgressBar,
+) -> Result<(), Error> {
+    rebuild(host, "dry-activate", processes, progress)
+        .status()
+        .await
+}
+
 /// Builds and temporarily activates a host configuration.
 pub(super) async fn test(
     host: &Host,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
-    rebuild(host, "test", processes, progress).await
+    rebuild(host, "test", processes, progress)
+        .timeout(REBUILD_TIMEOUT)
+        .status()
+        .await
 }
 
 /// Builds and persistently activates a host configuration.
@@ -82,16 +98,19 @@ pub(super) async fn switch(
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
 ) -> Result<(), Error> {
-    rebuild(host, "switch", processes, progress).await
+    rebuild(host, "switch", processes, progress)
+        .timeout(REBUILD_TIMEOUT)
+        .status()
+        .await
 }
 
-/// Delegates a complete deployment action to `nixos-rebuild`.
-async fn rebuild(
+/// Creates a complete `nixos-rebuild` deployment action.
+fn rebuild<'a>(
     host: &Host,
     action: &str,
-    processes: &ProcessContext<'_>,
-    progress: &ProgressBar,
-) -> Result<(), Error> {
+    processes: &'a ProcessContext<'a>,
+    progress: &'a ProgressBar,
+) -> Invocation<'a> {
     Invocation::new(
         processes,
         format!("deploy-{}-{action}", host.id()),
@@ -104,8 +123,6 @@ async fn rebuild(
     .argument("--target-host")
     .argument(host.ssh_url())
     .environment("NIX_SSHOPTS", ssh::nix_options())
-    .status()
-    .await
 }
 
 /// Prunes old generations and collects unreachable target store paths.

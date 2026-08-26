@@ -27,6 +27,12 @@ pub(crate) enum DeploymentPhase {
     CheckingStatus,
     /// Acquires exclusive access and validates reviewed state.
     Locking,
+    /// Builds and transfers the desired system without activating it.
+    Preparing,
+    /// Arms target-side restoration of the reviewed system.
+    ArmingRollback,
+    /// Cancels target-side restoration after successful activation.
+    DisarmingRollback,
     /// Builds and temporarily activates the desired system.
     Testing,
     /// Discovers and builds a configured verifier.
@@ -49,8 +55,10 @@ impl DeploymentPhase {
             Self::UpdatingInputs
             | Self::CheckingStatus
             | Self::Locking
+            | Self::Preparing
             | Self::Testing
             | Self::BuildingVerifier => style.blue(),
+            Self::ArmingRollback | Self::DisarmingRollback => style.magenta(),
             Self::RunningVerifier | Self::CollectingGarbage => style.yellow(),
             Self::Switching => style.magenta(),
             Self::RollingBack => style.red(),
@@ -64,6 +72,9 @@ impl Display for DeploymentPhase {
             Self::UpdatingInputs => "updating inputs",
             Self::CheckingStatus => "checking status",
             Self::Locking => "locking",
+            Self::Preparing => "preparing",
+            Self::ArmingRollback => "arming rollback",
+            Self::DisarmingRollback => "disarming rollback",
             Self::Testing => "testing",
             Self::BuildingVerifier => "building verifier",
             Self::RunningVerifier => "running verifier",
@@ -163,7 +174,7 @@ pub(crate) fn fail(progress: &ProgressBar) {
     progress.finish_with_message(format!("{failed}"));
 }
 
-/// Reports that live recovery failed and the host needs a reboot.
+/// Reports that target-side restoration could not be confirmed.
 pub(crate) fn recovery_required(progress: &ProgressBar, host: &str) {
     set_status(
         progress,
@@ -171,7 +182,7 @@ pub(crate) fn recovery_required(progress: &ProgressBar, host: &str) {
         "recovery required",
         &Style::new().for_stderr().red(),
     );
-    let message = style("live rollback failed; reboot through the machine console")
+    let message = style("rollback unconfirmed; target watchdog may still be armed")
         .for_stderr()
         .red();
     progress.finish_with_message(format!("{message}"));

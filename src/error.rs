@@ -70,6 +70,26 @@ pub(crate) enum Error {
         /// Identifies the system observed under the deployment lock.
         active: StorePath,
     },
+    /// Indicates that persistent activation produced an unexpected system.
+    #[error("host `{host}` activated system `{active}` instead of expected system `{expected}`")]
+    DeploymentMismatch {
+        /// Identifies the inventory host.
+        host: String,
+        /// Identifies the desired system.
+        expected: StorePath,
+        /// Identifies the system active after deployment.
+        active: StorePath,
+    },
+    /// Indicates that rollback produced an unexpected system.
+    #[error("host `{host}` restored system `{active}` instead of reviewed system `{expected}`")]
+    RollbackMismatch {
+        /// Identifies the inventory host.
+        host: String,
+        /// Identifies the reviewed system.
+        expected: StorePath,
+        /// Identifies the system active after rollback.
+        active: StorePath,
+    },
     /// Indicates that automatic commits require a tracked lock file.
     #[error("flake lock `{}` is not tracked by Git", path.display())]
     UntrackedFlakeLock {
@@ -111,9 +131,9 @@ pub(crate) enum Error {
     /// Indicates that a Nix store path was malformed.
     #[error(transparent)]
     StorePath(StorePathError),
-    /// Indicates that live rollback failed and console recovery is required.
+    /// Indicates that target-side rollback could not be confirmed.
     #[error(
-        "live rollback of host `{host}` failed after {trigger}: {rollback}; reboot it through the machine console"
+        "rollback of host `{host}` is unconfirmed after {trigger}: {rollback}; its target watchdog may still be armed"
     )]
     RollbackIncomplete {
         /// Identifies the inventory host.
