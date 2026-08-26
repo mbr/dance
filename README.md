@@ -8,7 +8,7 @@ nixos-rebuild switch --use-substitutes --flake .#web-server --target-host root@w
 
 `dance` wraps this in a nice utility to make it more comfortable:
 
-(TKTK asciinema record that i already have will go here)
+[![Dance deploying ten NixOS servers](docs/dance-deployment.gif)](https://asciinema.org/a/sSUw7XPxkSdJvDgL)
 
 ## What `dance` does for you
 
