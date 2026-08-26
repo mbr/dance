@@ -46,10 +46,10 @@ impl Outcome {
     pub(super) fn finish_progress(&self, host: &str, progress: &ProgressBar) {
         match self {
             Self::Activated => status::finish(progress, host),
-            Self::RecoveryRequired(_) => status::recovery_required(progress),
-            Self::Failed(_) | Self::RolledBack(_) | Self::CleanupFailed(_) => {
-                status::fail(progress);
-            }
+            Self::Failed(_) => status::deployment_failed(progress, host),
+            Self::RolledBack(_) => status::rolled_back(progress, host),
+            Self::RecoveryRequired(_) => status::recovery_required(progress, host),
+            Self::CleanupFailed(_) => status::cleanup_failed(progress, host),
         }
     }
 }
@@ -95,6 +95,11 @@ impl LockedHost {
 }
 
 impl ValidatedHost {
+    /// Returns the inventory identity of the validated host.
+    pub(super) fn id(&self) -> &str {
+        self.reviewed.id()
+    }
+
     /// Runs activation and recovery while owning the host lock.
     pub(super) async fn activate(
         self,

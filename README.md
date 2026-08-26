@@ -50,7 +50,7 @@ dance deploy --update --commit www # Commit the lock after successful deployment
 dance deploy --git www             # Shorthand for --update --commit
 ```
 
-Dance asks for confirmation, temporarily activates each system with `nixos-rebuild test`, builds and runs its verifier, then makes a successful test persistent with `nixos-rebuild switch`. A failed test or verifier causes Dance to reactivate the system observed during review. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
+Dance asks for confirmation, temporarily activates each system with `nixos-rebuild test`, builds and runs its verifier, then makes a successful test persistent with `nixos-rebuild switch`. A failed test or verifier causes Dance to reactivate the system observed during review. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
 
 A deployment centers on these two commands:
 

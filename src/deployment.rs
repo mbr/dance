@@ -67,41 +67,41 @@ struct ReviewResult {
 struct ActivationSummary {
     /// Counts successful activations.
     activated: usize,
-    /// Counts deployment failures left in place.
-    failed: usize,
-    /// Counts failures followed by successful restoration.
-    rolled_back: usize,
-    /// Counts hosts that need operator recovery.
-    recovery_required: usize,
-    /// Counts successful activations whose cleanup failed.
-    cleanup_failed: usize,
+    /// Identifies deployment failures left in place.
+    failed: Vec<String>,
+    /// Identifies failures followed by successful restoration.
+    rolled_back: Vec<String>,
+    /// Identifies hosts that need operator recovery.
+    recovery_required: Vec<String>,
+    /// Identifies successful activations whose cleanup failed.
+    cleanup_failed: Vec<String>,
     /// Retains the first deployment error.
     first_error: Option<Error>,
 }
 
 impl ActivationSummary {
     /// Adds one host outcome.
-    fn record(&mut self, outcome: HostOutcome) {
+    fn record(&mut self, host: String, outcome: HostOutcome) {
         let error = match outcome {
             HostOutcome::Activated => {
                 self.activated += 1;
                 return;
             }
             HostOutcome::Failed(error) => {
-                self.failed += 1;
+                self.failed.push(host);
                 error
             }
             HostOutcome::RolledBack(error) => {
-                self.rolled_back += 1;
+                self.rolled_back.push(host);
                 error
             }
             HostOutcome::RecoveryRequired(error) => {
-                self.recovery_required += 1;
+                self.recovery_required.push(host);
                 error
             }
             HostOutcome::CleanupFailed(error) => {
                 self.activated += 1;
-                self.cleanup_failed += 1;
+                self.cleanup_failed.push(host);
                 error
             }
         };
@@ -119,15 +119,26 @@ impl Display for ActivationSummary {
         write!(
             formatter,
             "deployment: {} activated, {} failed",
-            self.activated, self.failed
+            self.activated,
+            self.failed.len()
         )?;
         for (count, label) in [
-            (self.rolled_back, "rolled back"),
-            (self.recovery_required, "recovery required"),
-            (self.cleanup_failed, "cleanup failed"),
+            (self.rolled_back.len(), "rolled back"),
+            (self.recovery_required.len(), "recovery required"),
+            (self.cleanup_failed.len(), "cleanup failed"),
         ] {
             if count != 0 {
                 write!(formatter, ", {count} {label}")?;
+            }
+        }
+        for (hosts, label) in [
+            (&self.failed, "failed"),
+            (&self.rolled_back, "rolled back"),
+            (&self.recovery_required, "recovery required"),
+            (&self.cleanup_failed, "cleanup failed"),
+        ] {
+            if !hosts.is_empty() {
+                write!(formatter, "\n{label}: {}", hosts.join(", "))?;
             }
         }
         Ok(())
@@ -351,6 +362,10 @@ async fn activate_hosts(
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
     let locked = acquire_hosts(reviewed, &progresses).await?;
     let validated = revalidate_hosts(locked, &progresses, processes).await?;
+    let hosts = validated
+        .iter()
+        .map(|host| host.id().to_owned())
+        .collect::<Vec<_>>();
     let outcomes = join_all(
         validated
             .into_iter()
@@ -360,9 +375,31 @@ async fn activate_hosts(
     .await;
 
     let mut summary = ActivationSummary::default();
-    for outcome in outcomes {
-        summary.record(outcome);
+    for (host, outcome) in hosts.into_iter().zip(outcomes) {
+        summary.record(host, outcome);
     }
     println!("{summary}");
     summary.result()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{ActivationSummary, HostOutcome};
+    use crate::error::Error;
+
+    /// Checks that successful restoration remains visible and fails the workflow.
+    #[test]
+    fn rolled_back_hosts_are_reported_as_failures() {
+        let mut summary = ActivationSummary::default();
+        summary.record(
+            "www".to_owned(),
+            HostOutcome::RolledBack(Error::ConfirmationRequired),
+        );
+
+        assert_eq!(
+            summary.to_string(),
+            "deployment: 0 activated, 0 failed, 1 rolled back\nrolled back: www"
+        );
+        assert!(summary.result().is_err());
+    }
 }

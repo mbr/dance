@@ -100,21 +100,56 @@ pub(crate) fn set_phase(progress: &ProgressBar, host: &str, phase: DeploymentPha
     set_status(progress, host, phase, &phase.style());
 }
 
-/// Finishes a host status line successfully.
-fn finish_with_status(progress: &ProgressBar, host: &str, status: &str) {
+/// Finishes a host status line with an explicit outcome.
+fn finish_with_status(progress: &ProgressBar, host: &str, status: &str, status_style: &Style) {
     let message = progress.message();
-    set_status(progress, host, status, &Style::new().for_stderr().green());
+    set_status(progress, host, status, status_style);
     progress.finish_with_message(message);
 }
 
 /// Marks a host as successfully activated.
 pub(crate) fn finish(progress: &ProgressBar, host: &str) {
-    finish_with_status(progress, host, "activated");
+    finish_with_status(
+        progress,
+        host,
+        "activated",
+        &Style::new().for_stderr().green(),
+    );
+}
+
+/// Marks a host as restored after a failed deployment.
+pub(crate) fn rolled_back(progress: &ProgressBar, host: &str) {
+    finish_with_status(
+        progress,
+        host,
+        "rolled back",
+        &Style::new().for_stderr().red(),
+    );
+}
+
+/// Marks a host deployment as failed without restoration.
+pub(crate) fn deployment_failed(progress: &ProgressBar, host: &str) {
+    finish_with_status(progress, host, "failed", &Style::new().for_stderr().red());
+}
+
+/// Marks a successful activation whose cleanup failed.
+pub(crate) fn cleanup_failed(progress: &ProgressBar, host: &str) {
+    finish_with_status(
+        progress,
+        host,
+        "cleanup failed",
+        &Style::new().for_stderr().red(),
+    );
 }
 
 /// Marks a host verifier as successful.
 pub(crate) fn verified(progress: &ProgressBar, host: &str) {
-    finish_with_status(progress, host, "verified");
+    finish_with_status(
+        progress,
+        host,
+        "verified",
+        &Style::new().for_stderr().green(),
+    );
 }
 
 /// Marks a host without a configured verifier as skipped.
@@ -135,7 +170,13 @@ pub(crate) fn fail(progress: &ProgressBar) {
 }
 
 /// Reports that live recovery failed and the host needs a reboot.
-pub(crate) fn recovery_required(progress: &ProgressBar) {
+pub(crate) fn recovery_required(progress: &ProgressBar, host: &str) {
+    set_status(
+        progress,
+        host,
+        "recovery required",
+        &Style::new().for_stderr().red(),
+    );
     let message = style("live rollback failed; reboot through the machine console")
         .for_stderr()
         .red();
