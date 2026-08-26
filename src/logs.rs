@@ -78,12 +78,18 @@ pub(crate) struct CommandLog<'a> {
     span: Span,
     /// Measures command duration monotonically.
     started: Instant,
-    /// Receives standard output.
-    stdout: Option<OutputLog>,
-    /// Receives standard error.
-    stderr: Option<OutputLog>,
     /// Records whether the command was explicitly finalized.
     finished: bool,
+}
+
+/// Separates command lifecycle logging from its independently consumed output files.
+pub(crate) struct CommandDiagnostics<'a> {
+    /// Records command completion, failure, or interruption.
+    pub(crate) log: CommandLog<'a>,
+    /// Receives standard output when diagnostic logging is enabled.
+    pub(crate) stdout: Option<OutputLog>,
+    /// Receives standard error when diagnostic logging is enabled.
+    pub(crate) stderr: Option<OutputLog>,
 }
 
 /// Owns the diagnostic artifacts for one Dance invocation.
@@ -163,17 +169,19 @@ impl RunLog {
         label: &str,
         program: impl AsRef<OsStr>,
         arguments: &[OsString],
-    ) -> Result<CommandLog<'a>, LogError> {
+    ) -> Result<CommandDiagnostics<'a>, LogError> {
         let started = Instant::now();
         let Some(directory) = &self.directory else {
-            return Ok(CommandLog {
-                _run: self,
-                id: None,
-                span: Span::none(),
-                started,
+            return Ok(CommandDiagnostics {
+                log: CommandLog {
+                    _run: self,
+                    id: None,
+                    span: Span::none(),
+                    started,
+                    finished: false,
+                },
                 stdout: None,
                 stderr: None,
-                finished: false,
             });
         };
         let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
@@ -194,11 +202,14 @@ impl RunLog {
             "command started"
         );
 
-        Ok(CommandLog {
-            _run: self,
-            id: Some(id),
-            span,
-            started,
+        Ok(CommandDiagnostics {
+            log: CommandLog {
+                _run: self,
+                id: Some(id),
+                span,
+                started,
+                finished: false,
+            },
             stdout: Some(OutputLog {
                 path: stdout,
                 file: stdout_log,
@@ -207,7 +218,6 @@ impl RunLog {
                 path: stderr,
                 file: stderr_log,
             }),
-            finished: false,
         })
     }
 
@@ -242,11 +252,6 @@ impl RunLog {
 }
 
 impl CommandLog<'_> {
-    /// Takes the output streams used while the command runs.
-    pub(crate) fn take_outputs(&mut self) -> (Option<OutputLog>, Option<OutputLog>) {
-        (self.stdout.take(), self.stderr.take())
-    }
-
     /// Completes the command after its output has been captured.
     pub(crate) fn complete(mut self, status: ExitStatus) {
         if self.id.is_none() {
@@ -352,7 +357,9 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{LogMode, RunLog, SUBSCRIBER_LOCK, state_directory, test_subscriber};
+    use super::{
+        CommandDiagnostics, LogMode, RunLog, SUBSCRIBER_LOCK, state_directory, test_subscriber,
+    };
 
     /// Checks XDG state overrides and the home-directory fallback.
     #[test]
@@ -389,10 +396,13 @@ mod tests {
         let subscriber = test_subscriber(&mut logs);
         let directory = tracing::subscriber::with_default(subscriber, || {
             logs.record_start(Path::new("inventory.toml"));
-            let mut command = logs
+            let CommandDiagnostics {
+                log: command,
+                mut stdout,
+                mut stderr,
+            } = logs
                 .command("review party", "ssh", &["party".into()])
                 .expect("command log should start");
-            let (mut stdout, mut stderr) = command.take_outputs();
             stdout
                 .as_mut()
                 .expect("standard output log should exist")

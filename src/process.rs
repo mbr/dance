@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use self::streams::OutputConsumers;
 use crate::{
     error::Error,
-    logs::{CommandLog, RunLog},
+    logs::{CommandDiagnostics, CommandLog, RunLog},
 };
 
 /// Describes a failure encountered while running a subprocess.
@@ -258,12 +258,15 @@ impl<'a> Invocation<'a> {
         self,
         consume: impl FnOnce(Vec<u8>) -> Result<T, FromUtf8Error>,
     ) -> Result<T, Error> {
-        let mut command_log = self
+        let CommandDiagnostics {
+            log: command_log,
+            stdout: stdout_log,
+            stderr: stderr_log,
+        } = self
             .context
             .logs
             .command(&self.label, &self.program, &self.arguments)
             .map_err(Error::Log)?;
-        let (stdout_log, stderr_log) = command_log.take_outputs();
         let mut command = Command::new(&self.program);
         command
             .args(&self.arguments)
