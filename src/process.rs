@@ -1,24 +1,25 @@
 //! Subprocess execution and output reporting.
 
-mod streams;
-
 use std::{
-    ffi::OsString, future::IntoFuture, process::ExitStatus, string::FromUtf8Error, time::Duration,
+    ffi::OsString, future::IntoFuture, path::PathBuf, process::ExitStatus, string::FromUtf8Error,
+    time::Duration,
 };
 
 use indicatif::ProgressBar;
 use thiserror::Error;
 use tokio::process::Command;
 use tokio_process_tools::{
-    ConsumerError, DEFAULT_MAX_BUFFERED_CHUNKS, DEFAULT_READ_CHUNK_SIZE, GracefulShutdown, Process,
+    BroadcastOutputStream, Chunk, Consumable, Consumer, ConsumerError, DEFAULT_MAX_BUFFERED_CHUNKS,
+    DEFAULT_READ_CHUNK_SIZE, Delivery, GracefulShutdown, Next, Process, Replay, SinkWriteError,
     SpawnError, TerminationError, WaitForCompletionOrTerminateResult, WaitOrTerminateError,
+    WriteCollectionOptions,
+    visitors::{collect::CollectChunks, inspect::InspectChunks, write::WriteChunks},
 };
 use tokio_util::sync::CancellationToken;
 
-use self::streams::OutputConsumers;
 use crate::{
-    error::Error,
-    logs::{CommandLog, RunLog},
+    error::{Error, PathedError},
+    logs::{CommandLog, LogError, OutputLog, RunLog},
 };
 
 /// Describes a failure encountered while running a subprocess.
@@ -109,6 +110,174 @@ const ERROR_OUTPUT_LINES: usize = 20;
 const MAX_COMMAND_RUNTIME: Duration = Duration::from_secs(365 * 24 * 60 * 60);
 /// Allows subprocesses to handle graceful termination.
 const TERMINATION_GRACE: Duration = Duration::from_secs(2);
+/// Limits output draining after the child process exits.
+const OUTPUT_EOF_TIMEOUT: Duration = Duration::from_secs(3);
+
+/// Associates an asynchronous output-log consumer with its diagnostic path.
+struct LoggedOutput {
+    /// Locates the output file for error reporting.
+    path: PathBuf,
+    /// Writes subprocess chunks to the output file.
+    consumer: Consumer<Result<tokio::fs::File, SinkWriteError>>,
+}
+
+/// Owns the independent consumers attached to a subprocess's output streams.
+struct OutputConsumers {
+    /// Collects exact standard output for command results.
+    stdout: Consumer<Vec<u8>>,
+    /// Collects exact standard error for command failures.
+    stderr: Consumer<Vec<u8>>,
+    /// Writes standard output diagnostics when logging is enabled.
+    stdout_log: Option<LoggedOutput>,
+    /// Writes standard error diagnostics when logging is enabled.
+    stderr_log: Option<LoggedOutput>,
+    /// Reports recent standard output on the progress bar.
+    stdout_progress: Consumer<()>,
+    /// Reports recent standard error on the progress bar.
+    stderr_progress: Consumer<()>,
+}
+
+impl OutputConsumers {
+    /// Attaches collection, logging, and progress consumers before replay is sealed.
+    fn attach<D, R>(
+        stdout: &BroadcastOutputStream<D, R>,
+        stderr: &BroadcastOutputStream<D, R>,
+        stdout_log: Option<OutputLog>,
+        stderr_log: Option<OutputLog>,
+        progress: &ProgressBar,
+    ) -> Self
+    where
+        D: Delivery,
+        R: Replay,
+    {
+        Self {
+            stdout: collect_output(stdout),
+            stderr: collect_output(stderr),
+            stdout_log: log_output(stdout, stdout_log, "stdout"),
+            stderr_log: log_output(stderr, stderr_log, "stderr"),
+            stdout_progress: report_output(stdout, progress),
+            stderr_progress: report_output(stderr, progress),
+        }
+    }
+
+    /// Waits for every consumer under one post-exit deadline.
+    async fn finish(self, command: &str) -> Result<(Vec<u8>, Vec<u8>), Error> {
+        let completion = async {
+            let (stdout, stderr, stdout_log, stderr_log, stdout_progress, stderr_progress) = tokio::join!(
+                self.stdout.wait(),
+                self.stderr.wait(),
+                finish_log(self.stdout_log, command),
+                finish_log(self.stderr_log, command),
+                self.stdout_progress.wait(),
+                self.stderr_progress.wait(),
+            );
+            let stdout = stdout.map_err(|source| output_read_error(command, source))?;
+            let stderr = stderr.map_err(|source| output_read_error(command, source))?;
+            stdout_log?;
+            stderr_log?;
+            stdout_progress.map_err(|source| output_read_error(command, source))?;
+            stderr_progress.map_err(|source| output_read_error(command, source))?;
+            Ok((stdout, stderr))
+        };
+        tokio::time::timeout(OUTPUT_EOF_TIMEOUT, completion)
+            .await
+            .map_err(|_elapsed| {
+                Error::Process(ProcessError::OutputDrainTimedOut {
+                    command: command.to_owned(),
+                    seconds: OUTPUT_EOF_TIMEOUT.as_secs(),
+                })
+            })?
+    }
+}
+
+/// Attaches an unbounded exact-byte collector to one output stream.
+fn collect_output<D, R>(stream: &BroadcastOutputStream<D, R>) -> Consumer<Vec<u8>>
+where
+    D: Delivery,
+    R: Replay,
+{
+    stream
+        .consume(CollectChunks::fold(
+            Vec::new(),
+            |chunk: Chunk, output: &mut Vec<u8>| output.extend_from_slice(chunk.as_ref()),
+        ))
+        .expect("output stream should accept collection consumers")
+}
+
+/// Attaches an asynchronous diagnostic writer when logging is enabled.
+fn log_output<D, R>(
+    stream: &BroadcastOutputStream<D, R>,
+    log: Option<OutputLog>,
+    name: &'static str,
+) -> Option<LoggedOutput>
+where
+    D: Delivery,
+    R: Replay,
+{
+    log.map(|log| {
+        let (path, file) = log.into_parts();
+        let consumer = stream
+            .consume_async(WriteChunks::passthrough(
+                name,
+                tokio::fs::File::from_std(file),
+                WriteCollectionOptions::fail_fast(),
+            ))
+            .expect("output stream should accept logging consumers");
+        LoggedOutput { path, consumer }
+    })
+}
+
+/// Attaches a consumer that displays each stream's latest nonempty record.
+fn report_output<D, R>(stream: &BroadcastOutputStream<D, R>, progress: &ProgressBar) -> Consumer<()>
+where
+    D: Delivery,
+    R: Replay,
+{
+    let progress = progress.clone();
+    stream
+        .consume(
+            InspectChunks::builder()
+                .f(move |chunk: Chunk| {
+                    if let Some(message) = display_message(chunk.as_ref()) {
+                        progress.set_message(message);
+                    }
+                    Next::Continue
+                })
+                .build(),
+        )
+        .expect("output stream should accept progress consumers")
+}
+
+/// Waits for an optional output-log consumer and adds its path to write failures.
+async fn finish_log(log: Option<LoggedOutput>, command: &str) -> Result<(), Error> {
+    let Some(log) = log else {
+        return Ok(());
+    };
+    let result = log
+        .consumer
+        .wait()
+        .await
+        .map_err(|source| output_read_error(command, source))?;
+    result
+        .map(|_file| ())
+        .map_err(|source| Error::Log(LogError::WriteOutput(PathedError::new(log.path, source))))
+}
+
+/// Wraps an output consumer failure with command context.
+fn output_read_error(command: &str, source: ConsumerError) -> Error {
+    Error::Process(ProcessError::OutputRead {
+        command: command.to_owned(),
+        source,
+    })
+}
+
+/// Returns the last nonempty display line in an output chunk.
+fn display_message(record: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(record)
+        .rsplit(['\r', '\n'])
+        .find(|line| !line.trim().is_empty())
+        .map(str::to_owned)
+}
 
 /// Shares subprocess services across one application run.
 pub(crate) struct ProcessContext<'a> {
@@ -281,7 +450,7 @@ impl<'a> Invocation<'a> {
             .name(self.label.clone())
             .stdout_and_stderr(|stream| {
                 stream
-                    .single_subscriber()
+                    .broadcast()
                     .reliable_with_backpressure()
                     .replay_all()
                     .read_chunk_size(DEFAULT_READ_CHUNK_SIZE)
@@ -300,10 +469,14 @@ impl<'a> Invocation<'a> {
                 );
             }
         };
-        let consumers =
-            OutputConsumers::attach(process.stdout(), process.stderr(), stdout_log, stderr_log);
+        let consumers = OutputConsumers::attach(
+            process.stdout(),
+            process.stderr(),
+            stdout_log,
+            stderr_log,
+            self.progress,
+        );
         process.seal_output_replay();
-        let mut refresh = consumers.refresh_interval();
         let limit = self.timeout.unwrap_or(MAX_COMMAND_RUNTIME);
         let wait_result = {
             let wait = process
@@ -316,12 +489,9 @@ impl<'a> Invocation<'a> {
                 )
                 .into_future();
             tokio::pin!(wait);
-            loop {
-                tokio::select! {
-                    result = &mut wait => break Some(result),
-                    () = self.context.cancellation.cancelled() => break None,
-                    _ = refresh.tick() => consumers.refresh(self.progress),
-                }
+            tokio::select! {
+                result = &mut wait => Some(result),
+                () = self.context.cancellation.cancelled() => None,
             }
         };
         let completion = match wait_result {
@@ -363,7 +533,7 @@ impl<'a> Invocation<'a> {
                 }
             },
         };
-        let output = match consumers.finish(&command_display, self.progress).await {
+        let (stdout, stderr) = match consumers.finish(&command_display).await {
             Ok(output) => output,
             Err(error) => return fail_command(command_log, error),
         };
@@ -392,11 +562,11 @@ impl<'a> Invocation<'a> {
             return Err(Error::Process(ProcessError::Failed {
                 command: command_display,
                 status,
-                stderr: error_output(&output.stderr),
+                stderr: error_output(&stderr),
             }));
         }
 
-        match consume(output.stdout) {
+        match consume(stdout) {
             Ok(output) => {
                 command_log.complete(status);
                 Ok(output)
@@ -420,11 +590,21 @@ mod tests {
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
 
-    use super::{Invocation, ProcessContext, ProcessError};
+    use super::{Invocation, ProcessContext, ProcessError, display_message};
     use crate::{
         error::Error,
         logs::{LogMode, RunLog, SUBSCRIBER_LOCK, test_subscriber},
     };
+
+    /// Checks carriage-return and newline progress extraction.
+    #[test]
+    fn display_message_uses_the_last_nonempty_record() {
+        assert_eq!(
+            display_message(b"building\rchecking\n\n"),
+            Some("checking".to_owned())
+        );
+        assert_eq!(display_message(b"\r\n"), None);
+    }
 
     /// Checks bounded termination and explicit cancellation reporting.
     #[tokio::test]

@@ -8,7 +8,6 @@ use std::{
     env,
     ffi::{OsStr, OsString},
     fs::{self, File},
-    io::Write,
     path::{Path, PathBuf},
     process::ExitStatus,
     sync::atomic::{AtomicUsize, Ordering},
@@ -17,6 +16,7 @@ use std::{
 
 use clap::ValueEnum;
 use thiserror::Error;
+use tokio_process_tools::SinkWriteError;
 use tracing::Span;
 use tracing_appender::non_blocking::{NonBlocking, NonBlockingBuilder, WorkerGuard};
 use uuid::Uuid;
@@ -32,9 +32,12 @@ pub(crate) enum LogError {
     /// Indicates that a log directory could not be created.
     #[error("failed to create log directory")]
     CreateDirectory(#[source] PathedError),
-    /// Indicates that a log file could not be written.
-    #[error("failed to write log")]
-    Write(#[source] PathedError),
+    /// Indicates that a log file could not be opened.
+    #[error("failed to open log")]
+    Open(#[source] PathedError),
+    /// Indicates that subprocess output could not be written to its log.
+    #[error("failed to write output log")]
+    WriteOutput(#[source] PathedError<SinkWriteError>),
     /// Indicates that a completed log directory could not be removed.
     #[error("failed to remove log directory")]
     RemoveDirectory(#[source] PathedError),
@@ -60,11 +63,9 @@ pub(crate) struct OutputLog {
 }
 
 impl OutputLog {
-    /// Writes output bytes to the diagnostic file.
-    pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), LogError> {
-        self.file
-            .write_all(bytes)
-            .map_err(|source| LogError::Write(PathedError::new(self.path.clone(), source)))
+    /// Separates the diagnostic path from the file passed to an asynchronous stream writer.
+    pub(crate) fn into_parts(self) -> (PathBuf, File) {
+        (self.path, self.file)
     }
 }
 
@@ -325,7 +326,7 @@ fn create_run_directory(base: &Path) -> Result<PathBuf, LogError> {
 /// Creates a truncated diagnostic file.
 fn open_log(path: &Path) -> Result<File, LogError> {
     File::create(path)
-        .map_err(|source| LogError::Write(PathedError::new(path.to_path_buf(), source)))
+        .map_err(|source| LogError::Open(PathedError::new(path.to_path_buf(), source)))
 }
 
 /// Serializes tests that replace tracing's thread-local subscriber.
@@ -348,7 +349,7 @@ pub(crate) fn test_subscriber(logs: &mut RunLog) -> impl tracing::Subscriber {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, process::Command};
+    use std::{fs, io::Write, path::Path, process::Command};
 
     use tempfile::tempdir;
 
@@ -392,16 +393,18 @@ mod tests {
             let mut command = logs
                 .command("review party", "ssh", &["party".into()])
                 .expect("command log should start");
-            let (mut stdout, mut stderr) = command.take_outputs();
-            stdout
-                .as_mut()
+            let (stdout, stderr) = command.take_outputs();
+            let (_stdout_path, mut stdout) = stdout
                 .expect("standard output log should exist")
-                .write(b"standard output\n")
+                .into_parts();
+            stdout
+                .write_all(b"standard output\n")
                 .expect("standard output should be logged");
-            stderr
-                .as_mut()
+            let (_stderr_path, mut stderr) = stderr
                 .expect("standard error log should exist")
-                .write(b"standard error\n")
+                .into_parts();
+            stderr
+                .write_all(b"standard error\n")
                 .expect("standard error should be logged");
             let status = Command::new("true")
                 .status()
