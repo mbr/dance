@@ -24,7 +24,7 @@ use crate::{
     cli::{Cli, Command},
     error::Error,
     inventory::Inventory,
-    logs::RunLog,
+    logs::LogSession,
     process::ProcessContext,
 };
 
@@ -87,7 +87,7 @@ fn report(result: Result<(), Error>, logs: Result<Option<PathBuf>, Error>) -> Ex
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let mut logs = match RunLog::start(cli.logs, cli.logs_dir.as_deref()) {
+    let mut logs = match LogSession::start(cli.logs, cli.logs_dir.as_deref()) {
         Ok(logs) => logs,
         Err(error) => return report(Err(Error::Log(error)), Ok(None)),
     };

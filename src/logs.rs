@@ -71,7 +71,7 @@ impl OutputLog {
 /// Guards diagnostic artifacts and tracing state for one subprocess.
 pub(crate) struct CommandLog<'a> {
     /// Keeps the run's tracing writer alive for the command span.
-    _run: &'a RunLog,
+    _session: &'a LogSession,
     /// Identifies the command when diagnostics are enabled.
     id: Option<usize>,
     /// Groups command lifecycle events.
@@ -93,7 +93,7 @@ pub(crate) struct CommandDiagnostics<'a> {
 }
 
 /// Owns the diagnostic artifacts for one Dance invocation.
-pub(crate) struct RunLog {
+pub(crate) struct LogSession {
     /// Selects the artifact retention policy.
     mode: LogMode,
     /// Locates the run directory when logging is enabled.
@@ -110,7 +110,7 @@ pub(crate) struct RunLog {
     finished: bool,
 }
 
-impl RunLog {
+impl LogSession {
     /// Starts a run log using an optional base directory override.
     pub(crate) fn start(mode: LogMode, base: Option<&Path>) -> Result<Self, LogError> {
         let started = Instant::now();
@@ -174,7 +174,7 @@ impl RunLog {
         let Some(directory) = &self.directory else {
             return Ok(CommandDiagnostics {
                 log: CommandLog {
-                    _run: self,
+                    _session: self,
                     id: None,
                     span: Span::none(),
                     started,
@@ -204,7 +204,7 @@ impl RunLog {
 
         Ok(CommandDiagnostics {
             log: CommandLog {
-                _run: self,
+                _session: self,
                 id: Some(id),
                 span,
                 started,
@@ -290,7 +290,7 @@ impl Drop for CommandLog<'_> {
     }
 }
 
-impl Drop for RunLog {
+impl Drop for LogSession {
     /// Flushes interrupted runs and preserves their diagnostic directory.
     fn drop(&mut self) {
         if self.finished || self.directory.is_none() {
@@ -339,7 +339,7 @@ pub(crate) static SUBSCRIBER_LOCK: Mutex<()> = Mutex::new(());
 
 /// Creates an isolated subscriber for a log test.
 #[cfg(test)]
-pub(crate) fn test_subscriber(logs: &mut RunLog) -> impl tracing::Subscriber {
+pub(crate) fn test_subscriber(logs: &mut LogSession) -> impl tracing::Subscriber {
     let writer = logs
         .take_writer()
         .expect("enabled logs should provide a tracing writer");
@@ -358,7 +358,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CommandDiagnostics, LogMode, RunLog, SUBSCRIBER_LOCK, state_directory, test_subscriber,
+        CommandDiagnostics, LogMode, LogSession, SUBSCRIBER_LOCK, state_directory, test_subscriber,
     };
 
     /// Checks XDG state overrides and the home-directory fallback.
@@ -391,8 +391,8 @@ mod tests {
             .lock()
             .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let mut logs =
-            RunLog::start(LogMode::Always, Some(base.path())).expect("run log should start");
+        let mut logs = LogSession::start(LogMode::Always, Some(base.path()))
+            .expect("log session should start");
         let subscriber = test_subscriber(&mut logs);
         let directory = tracing::subscriber::with_default(subscriber, || {
             logs.record_start(Path::new("inventory.toml"));
@@ -448,8 +448,8 @@ mod tests {
             .lock()
             .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let mut interrupted =
-            RunLog::start(LogMode::OnError, Some(base.path())).expect("run log should start");
+        let mut interrupted = LogSession::start(LogMode::OnError, Some(base.path()))
+            .expect("log session should start");
         let interrupted_path = interrupted
             .directory
             .clone()
@@ -463,8 +463,8 @@ mod tests {
             .expect("interrupted trace log should be readable");
         assert!(trace.contains("run interrupted"));
 
-        let mut successful =
-            RunLog::start(LogMode::OnError, Some(base.path())).expect("run log should start");
+        let mut successful = LogSession::start(LogMode::OnError, Some(base.path()))
+            .expect("log session should start");
         let successful_path = successful
             .directory
             .clone()

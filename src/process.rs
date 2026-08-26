@@ -18,7 +18,7 @@ use tokio_util::sync::CancellationToken;
 use self::streams::OutputConsumers;
 use crate::{
     error::Error,
-    logs::{CommandDiagnostics, CommandLog, RunLog},
+    logs::{CommandDiagnostics, CommandLog, LogSession},
 };
 
 /// Describes a failure encountered while running a subprocess.
@@ -113,14 +113,14 @@ const TERMINATION_GRACE: Duration = Duration::from_secs(2);
 /// Shares subprocess services across one application run.
 pub(crate) struct ProcessContext<'a> {
     /// Provides persistent command diagnostics.
-    logs: &'a RunLog,
+    logs: &'a LogSession,
     /// Signals that active commands should terminate.
     cancellation: CancellationToken,
 }
 
 impl<'a> ProcessContext<'a> {
     /// Creates subprocess services for one application run.
-    pub(crate) fn new(logs: &'a RunLog, cancellation: CancellationToken) -> Self {
+    pub(crate) fn new(logs: &'a LogSession, cancellation: CancellationToken) -> Self {
         Self { logs, cancellation }
     }
 
@@ -426,13 +426,13 @@ mod tests {
     use super::{Invocation, ProcessContext, ProcessError};
     use crate::{
         error::Error,
-        logs::{LogMode, RunLog, SUBSCRIBER_LOCK, test_subscriber},
+        logs::{LogMode, LogSession, SUBSCRIBER_LOCK, test_subscriber},
     };
 
     /// Checks bounded termination and explicit cancellation reporting.
     #[tokio::test]
     async fn commands_report_timeouts_and_interruption() {
-        let logs = RunLog::start(LogMode::Never, None).expect("disabled logs should start");
+        let logs = LogSession::start(LogMode::Never, None).expect("disabled logs should start");
         let progress = ProgressBar::hidden();
         let timeout_cancellation = CancellationToken::new();
         let timeout_context = ProcessContext::new(&logs, timeout_cancellation);
@@ -472,8 +472,8 @@ mod tests {
             .lock()
             .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let mut logs =
-            RunLog::start(LogMode::Always, Some(base.path())).expect("enabled logs should start");
+        let mut logs = LogSession::start(LogMode::Always, Some(base.path()))
+            .expect("enabled logs should start");
         let subscriber = test_subscriber(&mut logs);
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let runtime = tokio::runtime::Builder::new_current_thread()
