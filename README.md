@@ -7,9 +7,10 @@ At its core, Dance takes servers defined in local Nix flakes and deploys them ov
 - An inventory keeps short server IDs and SSH addresses in one place.
 - Status checks and deployments run independently and in parallel across multiple servers.
 - `--update` updates the inputs of all selected flakes before comparison.
-- `nixos-rebuild test` builds, uploads, and temporarily activates each approved system before it becomes a boot generation.
+- `nixos-rebuild dry-activate` builds and uploads each approved system before rollback protection begins.
+- `nixos-rebuild test` temporarily activates the prepared system before it becomes a boot generation.
 - Flake verifiers are built before activation and can check a tested system externally or over SSH.
-- Verified systems are made persistent with `nixos-rebuild switch`; failed tests or verifiers trigger a best-effort live rollback.
+- Verified systems are made persistent with `nixos-rebuild switch`; a target-side watchdog protects testing, verification, and switching.
 - No separate deployment state is kept: Dance checks `/run/current-system` to determine whether an update is needed.
 
 ## Usage
@@ -50,15 +51,17 @@ dance deploy --update --commit www # Commit the lock after successful deployment
 dance deploy --git www             # Shorthand for --update --commit
 ```
 
-Dance asks for confirmation and then deploys each reviewed server independently. Each server is locked and revalidated before Dance builds its verifier, temporarily activates the system with `nixos-rebuild test`, runs the verifier, and makes a successful test persistent with `nixos-rebuild switch`. A failure on one server does not prevent unrelated servers from deploying.
+Dance asks for confirmation and then deploys each reviewed server independently. Each server is locked and revalidated before Dance builds its verifier and warms the deployment with `nixos-rebuild dry-activate`. Dance then arms a six-minute target-side rollback watchdog, temporarily activates the system with `nixos-rebuild test`, runs the verifier, and makes a successful test persistent with `nixos-rebuild switch`. A failure on one server does not prevent unrelated servers from deploying.
 
-A failed test or verifier causes Dance to reactivate the system observed during review. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
+A failed test or verifier triggers immediate restoration of the system observed during review. If Dance exits or loses contact after arming the watchdog, the target attempts the same restoration when the deadline expires. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If rollback cannot be confirmed, inspect the machine and use its console if necessary.
 
-A deployment centers on these two commands:
+A deployment centers on these complete rebuild commands:
 
 ```console
+nixos-rebuild dry-activate --use-substitutes --flake ../production#web-server --target-host root@www.example.com
+# Arm target-side rollback, then:
 nixos-rebuild test --use-substitutes --flake ../production#web-server --target-host root@www.example.com
-# Run the optional verifier.
+# Run the optional verifier, then:
 nixos-rebuild switch --use-substitutes --flake ../production#web-server --target-host root@www.example.com
 ```
 
@@ -72,7 +75,7 @@ Editing `flake.nix`, `flake.lock`, or other flake source files while Dance is ru
 
 Before preparing a server, Dance acquires `/run/lock/dance-deployment.lock` through SSH and verifies that the reviewed system is still active. That server's deployment fails rather than waiting when another Dance process holds its lock. Dance assumes an acquired lock's SSH process remains alive until release. The lock is advisory and does not prevent manual `nixos-rebuild` commands.
 
-Targets must be reachable through noninteractive SSH authentication. Dance disables password prompts and uses connection timeouts and keepalives for its SSH and `nixos-rebuild` operations. Deployments should have an out-of-band reboot path such as a hosting console.
+Targets must be reachable through noninteractive SSH authentication. Dance disables password prompts and uses connection timeouts and keepalives for its SSH and `nixos-rebuild` operations. The watchdog is transient and best-effort: it does not survive a target reboot or failures that stop systemd. Deployments must retain an out-of-band recovery path such as a hosting console.
 
 ## Verification
 
