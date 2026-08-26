@@ -8,13 +8,23 @@ use crate::{
     process::ProcessContext,
     ssh::lock::DeploymentLock,
     status::{self, DeploymentPhase},
-    verification,
+    verification::PreparedVerifier,
 };
 
-/// Owns a reviewed host and its acquired deployment lock.
+/// Owns a reviewed host and its optional prebuilt verifier.
+pub(super) struct PreparedHost {
+    /// Contains the reviewed host state.
+    reviewed: ReviewedHost,
+    /// Contains the verifier built before any host activation.
+    verifier: Option<PreparedVerifier>,
+}
+
+/// Owns a prepared host and its acquired deployment lock.
 pub(super) struct LockedHost {
     /// Contains the reviewed host state.
     reviewed: ReviewedHost,
+    /// Contains the verifier built before any host activation.
+    verifier: Option<PreparedVerifier>,
     /// Guards the host against overlapping deployment.
     _lock: DeploymentLock,
 }
@@ -23,6 +33,8 @@ pub(super) struct LockedHost {
 pub(super) struct ValidatedHost {
     /// Contains the reviewed host state.
     reviewed: ReviewedHost,
+    /// Contains the verifier built before any host activation.
+    verifier: Option<PreparedVerifier>,
     /// Guards the host throughout activation and recovery.
     _lock: DeploymentLock,
 }
@@ -54,18 +66,42 @@ impl Outcome {
     }
 }
 
-impl LockedHost {
-    /// Acquires the reviewed host's deployment lock.
-    pub(super) async fn acquire(
+impl PreparedHost {
+    /// Builds the reviewed host's verifier without modifying the host.
+    pub(super) async fn prepare(
         reviewed: ReviewedHost,
+        include_verifier: bool,
+        processes: &ProcessContext<'_>,
         progress: &ProgressBar,
     ) -> Result<Self, Error> {
-        status::set_phase(progress, reviewed.id(), DeploymentPhase::Locking);
-        let lock = DeploymentLock::acquire(reviewed.id(), &reviewed.host.ssh_url())
+        let verifier = if include_verifier {
+            status::set_phase(progress, reviewed.id(), DeploymentPhase::BuildingVerifier);
+            PreparedVerifier::prepare(&reviewed.host, processes, progress).await?
+        } else {
+            None
+        };
+        Ok(Self { reviewed, verifier })
+    }
+
+    /// Returns the inventory identity of the prepared host.
+    pub(super) fn id(&self) -> &str {
+        self.reviewed.id()
+    }
+}
+
+impl LockedHost {
+    /// Acquires the prepared host's deployment lock.
+    pub(super) async fn acquire(
+        prepared: PreparedHost,
+        progress: &ProgressBar,
+    ) -> Result<Self, Error> {
+        status::set_phase(progress, prepared.id(), DeploymentPhase::Locking);
+        let lock = DeploymentLock::acquire(prepared.id(), &prepared.reviewed.host.ssh_url())
             .await
             .map_err(Error::Lock)?;
         Ok(Self {
-            reviewed,
+            reviewed: prepared.reviewed,
+            verifier: prepared.verifier,
             _lock: lock,
         })
     }
@@ -89,6 +125,7 @@ impl LockedHost {
         }
         Ok(ValidatedHost {
             reviewed: self.reviewed,
+            verifier: self.verifier,
             _lock: self._lock,
         })
     }
@@ -107,7 +144,14 @@ impl ValidatedHost {
         processes: &ProcessContext<'_>,
         progress: &ProgressBar,
     ) -> Outcome {
-        let outcome = run_activation(&self.reviewed, options, processes, progress).await;
+        let outcome = run_activation(
+            &self.reviewed,
+            self.verifier.as_ref(),
+            options,
+            processes,
+            progress,
+        )
+        .await;
         outcome.finish_progress(self.reviewed.id(), progress);
         outcome
     }
@@ -149,6 +193,7 @@ async fn fail(
 /// Temporarily activates, verifies, persists, and cleans one host configuration.
 async fn run_activation(
     reviewed: &ReviewedHost,
+    verifier: Option<&PreparedVerifier>,
     options: ActivationOptions,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
@@ -166,18 +211,23 @@ async fn run_activation(
         .await;
     }
 
-    if options.include_verifier
-        && let Err(error) = verification::run_configured(&reviewed.host, processes, progress).await
-    {
-        return fail(
-            reviewed,
-            options,
-            rollback::Persistence::Runtime,
-            error,
-            processes,
+    if let Some(verifier) = verifier {
+        status::set_phase(
             progress,
-        )
-        .await;
+            reviewed.host.id(),
+            DeploymentPhase::RunningVerifier,
+        );
+        if let Err(error) = verifier.run(&reviewed.host, processes, progress).await {
+            return fail(
+                reviewed,
+                options,
+                rollback::Persistence::Runtime,
+                error,
+                processes,
+                progress,
+            )
+            .await;
+        }
     }
 
     status::set_phase(progress, reviewed.host.id(), DeploymentPhase::Switching);

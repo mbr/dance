@@ -16,7 +16,7 @@ use futures::future::join_all;
 use tabled::Table;
 
 use self::{
-    host::{LockedHost, Outcome as HostOutcome, ValidatedHost},
+    host::{LockedHost, Outcome as HostOutcome, PreparedHost, ValidatedHost},
     review::{HostRow, ReviewOutcome, ReviewedHost, Validity},
 };
 use crate::{
@@ -324,13 +324,49 @@ fn confirm() -> Result<bool, Error> {
         .map_err(|source| Error::Confirmation { source })
 }
 
+/// Builds every configured verifier before any host can be modified.
+async fn prepare_hosts(
+    reviewed: Vec<ReviewedHost>,
+    include_verifier: bool,
+    progresses: &[indicatif::ProgressBar],
+    processes: &ProcessContext<'_>,
+) -> Result<Vec<PreparedHost>, Error> {
+    let results = join_all(
+        reviewed
+            .into_iter()
+            .zip(progresses)
+            .map(|(host, progress)| {
+                PreparedHost::prepare(host, include_verifier, processes, progress)
+            }),
+    )
+    .await;
+    let mut prepared = Vec::with_capacity(results.len());
+    let mut first_error = None;
+    for result in results {
+        match result {
+            Ok(host) => prepared.push(host),
+            Err(error) => {
+                first_error.get_or_insert(error);
+            }
+        }
+    }
+    if let Some(error) = first_error {
+        for progress in progresses {
+            status::fail(progress);
+        }
+        Err(error)
+    } else {
+        Ok(prepared)
+    }
+}
+
 /// Acquires every host lock without beginning partial activation.
 async fn acquire_hosts(
-    reviewed: Vec<ReviewedHost>,
+    prepared: Vec<PreparedHost>,
     progresses: &[indicatif::ProgressBar],
 ) -> Result<Vec<LockedHost>, Error> {
     let results = join_all(
-        reviewed
+        prepared
             .into_iter()
             .zip(progresses)
             .map(|(host, progress)| LockedHost::acquire(host, progress)),
@@ -397,7 +433,9 @@ async fn activate_hosts(
 ) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
-    let locked = acquire_hosts(reviewed, &progresses).await?;
+    let prepared =
+        prepare_hosts(reviewed, options.include_verifier, &progresses, processes).await?;
+    let locked = acquire_hosts(prepared, &progresses).await?;
     let validated = revalidate_hosts(locked, &progresses, processes).await?;
     let hosts = validated
         .iter()

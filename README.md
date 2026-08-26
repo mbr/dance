@@ -8,7 +8,7 @@ At its core, Dance takes servers defined in local Nix flakes and deploys them ov
 - Status checks and deployments run in parallel across multiple servers.
 - `--update` updates the inputs of all selected flakes before comparison.
 - `nixos-rebuild test` builds, uploads, and temporarily activates each approved system before it becomes a boot generation.
-- Flake verifiers are built after the test activation and can check it externally or over SSH.
+- Flake verifiers are built before activation and can check a tested system externally or over SSH.
 - Verified systems are made persistent with `nixos-rebuild switch`; failed tests or verifiers trigger a best-effort live rollback.
 - No separate deployment state is kept: Dance checks `/run/current-system` to determine whether an update is needed.
 
@@ -50,7 +50,7 @@ dance deploy --update --commit www # Commit the lock after successful deployment
 dance deploy --git www             # Shorthand for --update --commit
 ```
 
-Dance asks for confirmation, temporarily activates each system with `nixos-rebuild test`, builds and runs its verifier, then makes a successful test persistent with `nixos-rebuild switch`. A failed test or verifier causes Dance to reactivate the system observed during review. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
+Dance asks for confirmation, builds every configured verifier, temporarily activates each system with `nixos-rebuild test`, runs its verifier, then makes a successful test persistent with `nixos-rebuild switch`. A failed test or verifier causes Dance to reactivate the system observed during review. Final host statuses and the deployment summary identify rolled-back hosts explicitly, and a deployment that required rollback exits unsuccessfully. If that live rollback fails, reboot the machine through its console to return to the persistent generation.
 
 A deployment centers on these two commands:
 
