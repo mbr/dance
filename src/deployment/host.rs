@@ -82,6 +82,9 @@ pub(super) async fn deploy(
         Ok(lock) => lock,
         Err(error) => return Outcome::Failed(Error::Lock(error)),
     };
+    if let Err(error) = rollback::ensure_absent(&reviewed.host, processes, progress).await {
+        return Outcome::Failed(error);
+    }
 
     let active = match operations::deployed_store_path(&reviewed.host, processes, progress).await {
         Ok(active) => active,

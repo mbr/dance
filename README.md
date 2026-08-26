@@ -73,7 +73,7 @@ With `--update --commit`, or its `--git` shorthand, Dance requires `flake.nix` a
 
 Editing `flake.nix`, `flake.lock`, or other flake source files while Dance is running is undefined behavior.
 
-Before preparing a server, Dance acquires `/run/lock/dance-deployment.lock` through SSH and verifies that the reviewed system is still active. That server's deployment fails rather than waiting when another Dance process holds its lock. Dance assumes an acquired lock's SSH process remains alive until release. The lock is advisory and does not prevent manual `nixos-rebuild` commands.
+Before preparing a server, Dance acquires `/run/lock/dance-deployment.lock` through SSH, rejects any watchdog left by an earlier deployment, and verifies that the reviewed system is still active. That server's deployment fails rather than waiting when another Dance process holds its lock. An inherited watchdog must finish or be resolved manually before retrying. Dance assumes an acquired lock's SSH process remains alive until release. The lock is advisory and does not prevent manual `nixos-rebuild` commands.
 
 Targets must be reachable through noninteractive SSH authentication. Dance disables password prompts and uses connection timeouts and keepalives for its SSH and `nixos-rebuild` operations. The watchdog is transient and best-effort: it does not survive a target reboot or failures that stop systemd. Deployments must retain an out-of-band recovery path such as a hosting console.
 

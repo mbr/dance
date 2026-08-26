@@ -90,6 +90,14 @@ pub(crate) enum Error {
         /// Identifies the system active after rollback.
         active: StorePath,
     },
+    /// Indicates that an earlier deployment still owns rollback protection.
+    #[error("host `{host}` has an existing rollback watchdog:\n{units}")]
+    ExistingRollbackWatchdog {
+        /// Identifies the inventory host.
+        host: String,
+        /// Describes the target-side watchdog units.
+        units: String,
+    },
     /// Indicates that automatic commits require a tracked lock file.
     #[error("flake lock `{}` is not tracked by Git", path.display())]
     UntrackedFlakeLock {

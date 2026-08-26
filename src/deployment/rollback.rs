@@ -11,6 +11,33 @@ use crate::{error::Error, inventory::Host, process::ProcessContext, store_path::
 /// Bounds the activation and verification window after cache warming.
 const WATCHDOG_TIMEOUT: Duration = Duration::from_mins(6);
 
+/// Rejects a host still protected by an earlier deployment watchdog.
+pub(super) async fn ensure_absent(
+    host: &Host,
+    processes: &ProcessContext<'_>,
+    progress: &ProgressBar,
+) -> Result<(), Error> {
+    let units = operations::ssh(
+        host,
+        format!("deploy-{}-check-rollback", host.id()),
+        processes,
+        progress,
+    )
+    .argument("systemctl list-units --all --full --plain --no-legend 'dance-rollback-*'")
+    .timeout(SSH_TIMEOUT)
+    .output()
+    .await?;
+    let units = units.trim();
+    if units.is_empty() {
+        Ok(())
+    } else {
+        Err(Error::ExistingRollbackWatchdog {
+            host: host.id().to_owned(),
+            units: units.to_owned(),
+        })
+    }
+}
+
 /// Identifies one armed target-side rollback watchdog.
 ///
 /// Dropping the handle intentionally leaves the target timer armed.
