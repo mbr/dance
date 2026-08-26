@@ -51,25 +51,26 @@ pub(crate) enum LogMode {
     Never,
 }
 
-/// Writes one subprocess output stream to its diagnostic file.
-pub(crate) struct OutputLog {
+/// Owns one diagnostic log file and its path.
+pub(crate) struct LogFile {
     /// Locates the output file for error reporting.
     path: PathBuf,
     /// Receives subprocess output bytes.
     file: File,
 }
 
-impl OutputLog {
-    /// Creates one numbered command output log and returns its artifact name.
-    fn create(
-        directory: &Path,
-        command_id: usize,
-        stream: &str,
-    ) -> Result<(String, Self), LogError> {
-        let name = format!("{command_id:03}.{stream}");
-        let path = directory.join(&name);
-        let file = open_log(&path)?;
-        Ok((name, Self { path, file }))
+impl LogFile {
+    /// Creates one diagnostic file within a log directory.
+    fn create(directory: &Path, name: &str) -> Result<Self, LogError> {
+        let path = directory.join(name);
+        let file = File::create(&path)
+            .map_err(|source| LogError::Write(PathedError::new(path.clone(), source)))?;
+        Ok(Self { path, file })
+    }
+
+    /// Returns the file without its diagnostic path.
+    fn into_file(self) -> File {
+        self.file
     }
 
     /// Writes output bytes to the diagnostic file.
@@ -99,9 +100,9 @@ pub(crate) struct CommandLogs<'a> {
     /// Records command completion, failure, or interruption.
     pub(crate) lifecycle: CommandLog<'a>,
     /// Receives standard output when diagnostic logging is enabled.
-    pub(crate) stdout: Option<OutputLog>,
+    pub(crate) stdout: Option<LogFile>,
     /// Receives standard error when diagnostic logging is enabled.
-    pub(crate) stderr: Option<OutputLog>,
+    pub(crate) stderr: Option<LogFile>,
 }
 
 /// Owns the diagnostic artifacts for one Dance invocation.
@@ -147,8 +148,7 @@ impl LogSession {
         fs::create_dir_all(&base)
             .map_err(|source| LogError::CreateDirectory(PathedError::new(base.clone(), source)))?;
         let directory = create_run_directory(&base)?;
-        let path = directory.join("run.log");
-        let file = open_log(&path)?;
+        let file = LogFile::create(&directory, "run.log")?.into_file();
         let (writer, worker) = NonBlockingBuilder::default().lossy(false).finish(file);
         Ok(Self {
             mode,
@@ -197,8 +197,10 @@ impl LogSession {
             });
         };
         let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
-        let (stdout_name, stdout) = OutputLog::create(directory, id, "stdout")?;
-        let (stderr_name, stderr) = OutputLog::create(directory, id, "stderr")?;
+        let stdout_name = format!("{id:03}.stdout");
+        let stderr_name = format!("{id:03}.stderr");
+        let stdout = LogFile::create(directory, &stdout_name)?;
+        let stderr = LogFile::create(directory, &stderr_name)?;
         let span = tracing::info_span!("command", id);
         tracing::info!(
             parent: &span,
@@ -327,12 +329,6 @@ fn create_run_directory(base: &Path) -> Result<PathBuf, LogError> {
         .create(&path)
         .map_err(|source| LogError::CreateDirectory(PathedError::new(path.clone(), source)))?;
     Ok(path)
-}
-
-/// Creates a truncated diagnostic file.
-fn open_log(path: &Path) -> Result<File, LogError> {
-    File::create(path)
-        .map_err(|source| LogError::Write(PathedError::new(path.to_path_buf(), source)))
 }
 
 /// Serializes tests that replace tracing's thread-local subscriber.

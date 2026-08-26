@@ -6,7 +6,7 @@
 //! three jobs for each stream:
 //!
 //! - retain the exact bytes for the eventual command result or error;
-//! - copy the bytes to the command's persistent [`OutputLog`], when logging is enabled;
+//! - copy the bytes to the command's persistent [`LogFile`], when logging is enabled;
 //! - extract recent human-readable text for the command's progress bar.
 //!
 //! While the child runs, `Invocation` polls [`OutputConsumers::refresh_interval`] alongside process
@@ -35,7 +35,7 @@ use tokio_process_tools::{
 use super::ProcessError;
 use crate::{
     error::Error,
-    logs::{LogError, OutputLog},
+    logs::{LogError, LogFile},
 };
 
 /// Limits how often subprocess output changes a progress message.
@@ -62,7 +62,7 @@ struct Capture {
     /// Retains output for command results and errors.
     bytes: Vec<u8>,
     /// Writes output to persistent diagnostics when enabled.
-    log: Option<OutputLog>,
+    log: Option<LogFile>,
     /// Retains the first diagnostic write failure.
     error: Option<LogError>,
     /// Shares the latest progress record across output streams.
@@ -120,8 +120,8 @@ impl OutputConsumers {
     pub(super) fn attach<D, R>(
         stdout: &SingleSubscriberOutputStream<D, R>,
         stderr: &SingleSubscriberOutputStream<D, R>,
-        stdout_log: Option<OutputLog>,
-        stderr_log: Option<OutputLog>,
+        stdout_log: Option<LogFile>,
+        stderr_log: Option<LogFile>,
     ) -> Self
     where
         D: Delivery,
@@ -190,7 +190,7 @@ impl OutputConsumers {
 /// Attaches one output consumer.
 fn attach<D, R>(
     stream: &SingleSubscriberOutputStream<D, R>,
-    log: Option<OutputLog>,
+    log: Option<LogFile>,
     latest: Arc<Mutex<Option<String>>>,
 ) -> Consumer<Result<Vec<u8>, LogError>>
 where
