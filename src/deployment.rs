@@ -11,7 +11,7 @@ use std::{
 };
 
 use dialoguer::{Confirm, console::style, theme::ColorfulTheme};
-use futures::future::join_all;
+use futures::future::{join_all, select_all};
 use tabled::Table;
 
 use self::{
@@ -253,13 +253,21 @@ async fn release_leases(leases: Vec<DeploymentLease>) {
 async fn revalidate(
     reviewed: &[ReviewedHost],
     progresses: &[indicatif::ProgressBar],
+    leases: &mut [DeploymentLease],
     processes: &ProcessContext<'_>,
 ) -> Result<(), Error> {
     let active =
         join_all(reviewed.iter().zip(progresses).map(|(host, progress)| {
             operations::deployed_store_path(&host.host, processes, progress)
-        }))
-        .await;
+        }));
+    let losses = leases
+        .iter_mut()
+        .map(|lease| Box::pin(lease.lost()))
+        .collect::<Vec<_>>();
+    let active = tokio::select! {
+        active = active => active,
+        (error, _, _) = select_all(losses) => return Err(Error::Lock(error)),
+    };
     for (host, active) in reviewed.iter().zip(active) {
         let active = active?;
         if active != host.deployed {
@@ -281,8 +289,8 @@ async fn activate(
 ) -> Result<(), Error> {
     let display = ProgressDisplay::new()?;
     let progresses = display.hosts(reviewed.iter().map(ReviewedHost::id));
-    let leases = acquire_leases(&reviewed, &progresses).await?;
-    if let Err(error) = revalidate(&reviewed, &progresses, processes).await {
+    let mut leases = acquire_leases(&reviewed, &progresses).await?;
+    if let Err(error) = revalidate(&reviewed, &progresses, &mut leases, processes).await {
         release_leases(leases).await;
         for progress in &progresses {
             status::fail(progress);
@@ -296,6 +304,12 @@ async fn activate(
             let deployment = activation::activate(&host, options, &host_processes, progress);
             tokio::pin!(deployment);
             let outcome = tokio::select! {
+                biased;
+                error = lease.lost() => {
+                    host_processes.cancel();
+                    let _ = deployment.await;
+                    activation::Outcome::RecoveryRequired(Error::Lock(error))
+                }
                 outcome = &mut deployment => {
                     match lease.release().await {
                         Ok(()) => outcome,
@@ -311,11 +325,6 @@ async fn activate(
                             outcome
                         }
                     }
-                }
-                error = lease.lost() => {
-                    host_processes.cancel();
-                    let _ = deployment.await;
-                    activation::Outcome::RecoveryRequired(Error::Lock(error))
                 }
             };
             outcome.finish_progress(host.id(), progress);
