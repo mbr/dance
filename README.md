@@ -3,7 +3,7 @@
 `nixos-rebuild` can deploy a flake-based NixOS server with a single command:
 
 ```console
-nixos-rebuild switch --use-substitutes --flake .#web-server --target-host root@www.example.com
+nixos-rebuild switch --use-substitutes --flake .#web-server --target-host root@example.com
 ```
 
 `dance` wraps this in a nice utility to make it more comfortable:
@@ -30,7 +30,7 @@ An inventory contains any number of hosts with three fields:
 # `www` is the ID used on the command line and in output.
 [hosts.www]
 # Hostname or SSH configuration alias used to reach the machine.
-ssh_host = "www.example.com"
+ssh_host = "example.com"
 # Flake directory, relative to this inventory.
 flake_path = "../production"
 # Server configuration within the flake.
@@ -96,7 +96,7 @@ danceVerifiers.${system}.web-server = pkgs.writeShellApplication {
   runtimeInputs = [ pkgs.hurl ];
   text = ''
     hurl --test <<'EOF'
-    GET https://www.example.com/
+    GET https://example.com/
     HTTP 200
     EOF
   '';
