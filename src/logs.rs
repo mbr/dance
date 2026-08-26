@@ -111,40 +111,45 @@ pub(crate) struct CommandLogs<'a> {
     pub(crate) output: Option<OutputLogs>,
 }
 
+/// Owns resources present only while persistent logging is enabled.
+enum LogStorage {
+    /// Indicates that the invocation produces no diagnostic artifacts.
+    Disabled,
+    /// Owns the run directory, tracing writer, and flushing guard.
+    Enabled {
+        /// Locates the run's diagnostic artifacts.
+        directory: PathBuf,
+        /// Provides the tracing subscriber's writer.
+        writer: NonBlocking,
+        /// Flushes and closes the tracing writer when storage is dropped.
+        _worker: WorkerGuard,
+        /// Selects whether successful run artifacts are retained.
+        retain_successful: bool,
+        /// Measures run duration monotonically.
+        started: Instant,
+        /// Allocates command identifiers in start order.
+        next_command_id: AtomicUsize,
+        /// Records whether the run was explicitly finalized.
+        finished: bool,
+    },
+}
+
 /// Owns the diagnostic artifacts for one Dance invocation.
 pub(crate) struct LogSession {
-    /// Selects the artifact retention policy.
-    mode: LogMode,
-    /// Locates the run directory when logging is enabled.
-    directory: Option<PathBuf>,
-    /// Measures run duration monotonically.
-    started: Instant,
-    /// Allocates command identifiers in start order.
-    next_command_id: AtomicUsize,
-    /// Provides the tracing writer before global initialization.
-    writer: Option<NonBlocking>,
-    /// Flushes and closes the tracing writer.
-    worker: Option<WorkerGuard>,
-    /// Records whether the run was explicitly finalized.
-    finished: bool,
+    /// Owns optional persistent logging resources and lifecycle state.
+    storage: LogStorage,
 }
 
 impl LogSession {
     /// Starts a run log using an optional base directory override.
     pub(crate) fn start(mode: LogMode, base: Option<&Path>) -> Result<Self, LogError> {
-        let started = Instant::now();
         if matches!(mode, LogMode::Never) {
             return Ok(Self {
-                mode,
-                directory: None,
-                started,
-                next_command_id: AtomicUsize::new(1),
-                writer: None,
-                worker: None,
-                finished: false,
+                storage: LogStorage::Disabled,
             });
         }
 
+        let started = Instant::now();
         let base = match base {
             Some(base) => base.to_path_buf(),
             None => state_directory(env::var_os("XDG_STATE_HOME"), dirs::home_dir())
@@ -157,24 +162,38 @@ impl LogSession {
         let file = LogFile::create(&directory, "run.log")?.into_file();
         let (writer, worker) = NonBlockingBuilder::default().lossy(false).finish(file);
         Ok(Self {
-            mode,
-            directory: Some(directory),
-            started,
-            next_command_id: AtomicUsize::new(1),
-            writer: Some(writer),
-            worker: Some(worker),
-            finished: false,
+            storage: LogStorage::Enabled {
+                directory,
+                writer,
+                _worker: worker,
+                retain_successful: matches!(mode, LogMode::Always),
+                started,
+                next_command_id: AtomicUsize::new(1),
+                finished: false,
+            },
         })
     }
 
-    /// Takes the tracing writer for global subscriber initialization.
-    pub(crate) fn take_writer(&mut self) -> Option<NonBlocking> {
-        self.writer.take()
+    /// Returns a tracing writer when persistent logging is enabled.
+    pub(crate) fn writer(&self) -> Option<NonBlocking> {
+        match &self.storage {
+            LogStorage::Disabled => None,
+            LogStorage::Enabled { writer, .. } => Some(writer.clone()),
+        }
+    }
+
+    /// Returns the run directory when persistent logging is enabled.
+    #[cfg(test)]
+    fn directory(&self) -> Option<&Path> {
+        match &self.storage {
+            LogStorage::Disabled => None,
+            LogStorage::Enabled { directory, .. } => Some(directory),
+        }
     }
 
     /// Records the invocation after tracing has been initialized.
     pub(crate) fn record_start(&self, inventory: &Path) {
-        if self.directory.is_none() {
+        if matches!(self.storage, LogStorage::Disabled) {
             return;
         }
         let arguments = std::env::args_os().collect::<Vec<_>>();
@@ -189,7 +208,12 @@ impl LogSession {
         arguments: &[OsString],
     ) -> Result<CommandLogs<'a>, LogError> {
         let started = Instant::now();
-        let Some(directory) = &self.directory else {
+        let LogStorage::Enabled {
+            directory,
+            next_command_id,
+            ..
+        } = &self.storage
+        else {
             return Ok(CommandLogs {
                 lifecycle: CommandLog {
                     _session: self,
@@ -201,7 +225,7 @@ impl LogSession {
                 output: None,
             });
         };
-        let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
+        let id = next_command_id.fetch_add(1, Ordering::Relaxed);
         let stdout_name = format!("{id:03}.stdout");
         let stderr_name = format!("{id:03}.stderr");
         let stdout = LogFile::create(directory, &stdout_name)?;
@@ -231,31 +255,34 @@ impl LogSession {
 
     /// Finalizes the run and returns the retained log directory.
     pub(crate) fn finish(mut self, error: Option<&str>) -> Result<Option<PathBuf>, LogError> {
-        let Some(directory) = self.directory.clone() else {
-            self.finished = true;
+        let LogStorage::Enabled {
+            directory,
+            retain_successful,
+            started,
+            finished,
+            ..
+        } = &mut self.storage
+        else {
             return Ok(None);
         };
-        let duration_ms = elapsed_milliseconds(self.started);
+        let directory = directory.clone();
+        let duration_ms = elapsed_milliseconds(*started);
         match error {
             Some(error) => tracing::warn!(duration_ms, error, "run failed"),
             None => tracing::info!(duration_ms, "run succeeded"),
         }
-        self.close_writer();
+        let remove = error.is_none() && !*retain_successful;
+        *finished = true;
+        drop(self);
 
-        let retained = if error.is_none() && matches!(self.mode, LogMode::OnError) {
-            fs::remove_dir_all(&directory)
-                .map_err(|source| LogError::RemoveDirectory(PathedError::new(directory, source)))?;
-            None
+        if remove {
+            fs::remove_dir_all(&directory).map_err(|source| {
+                LogError::RemoveDirectory(PathedError::new(directory.clone(), source))
+            })?;
+            Ok(None)
         } else {
-            Some(directory)
-        };
-        self.finished = true;
-        Ok(retained)
-    }
-
-    /// Flushes pending tracing events and closes the log file.
-    fn close_writer(&mut self) {
-        drop(self.worker.take());
+            Ok(Some(directory))
+        }
     }
 }
 
@@ -301,12 +328,16 @@ impl Drop for CommandLog<'_> {
 impl Drop for LogSession {
     /// Flushes interrupted runs and preserves their diagnostic directory.
     fn drop(&mut self) {
-        if self.finished || self.directory.is_none() {
+        let LogStorage::Enabled {
+            started, finished, ..
+        } = &self.storage
+        else {
             return;
+        };
+        if !finished {
+            let duration_ms = elapsed_milliseconds(*started);
+            tracing::warn!(duration_ms, "run interrupted");
         }
-        let duration_ms = elapsed_milliseconds(self.started);
-        tracing::warn!(duration_ms, "run interrupted");
-        self.close_writer();
     }
 }
 
@@ -341,9 +372,9 @@ pub(crate) static SUBSCRIBER_LOCK: Mutex<()> = Mutex::new(());
 
 /// Creates an isolated subscriber for a log test.
 #[cfg(test)]
-pub(crate) fn test_subscriber(logs: &mut LogSession) -> impl tracing::Subscriber {
+pub(crate) fn test_subscriber(logs: &LogSession) -> impl tracing::Subscriber {
     let writer = logs
-        .take_writer()
+        .writer()
         .expect("enabled logs should provide a tracing writer");
     tracing_subscriber::fmt()
         .compact()
@@ -394,9 +425,9 @@ mod tests {
             .lock()
             .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let mut logs = LogSession::start(LogMode::Always, Some(base.path()))
+        let logs = LogSession::start(LogMode::Always, Some(base.path()))
             .expect("log session should start");
-        let subscriber = test_subscriber(&mut logs);
+        let subscriber = test_subscriber(&logs);
         let directory = tracing::subscriber::with_default(subscriber, || {
             logs.record_start(Path::new("inventory.toml"));
             let CommandLogs {
@@ -450,13 +481,13 @@ mod tests {
             .lock()
             .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let mut interrupted = LogSession::start(LogMode::OnError, Some(base.path()))
+        let interrupted = LogSession::start(LogMode::OnError, Some(base.path()))
             .expect("log session should start");
         let interrupted_path = interrupted
-            .directory
-            .clone()
-            .expect("enabled logs should have a directory");
-        let subscriber = test_subscriber(&mut interrupted);
+            .directory()
+            .expect("enabled logs should have a directory")
+            .to_path_buf();
+        let subscriber = test_subscriber(&interrupted);
         tracing::subscriber::with_default(subscriber, || {
             interrupted.record_start(Path::new("inventory.toml"));
             drop(interrupted);
@@ -465,13 +496,13 @@ mod tests {
             .expect("interrupted trace log should be readable");
         assert!(trace.contains("run interrupted"));
 
-        let mut successful = LogSession::start(LogMode::OnError, Some(base.path()))
+        let successful = LogSession::start(LogMode::OnError, Some(base.path()))
             .expect("log session should start");
         let successful_path = successful
-            .directory
-            .clone()
-            .expect("enabled logs should have a directory");
-        let subscriber = test_subscriber(&mut successful);
+            .directory()
+            .expect("enabled logs should have a directory")
+            .to_path_buf();
+        let subscriber = test_subscriber(&successful);
         tracing::subscriber::with_default(subscriber, || {
             successful.record_start(Path::new("inventory.toml"));
             assert_eq!(

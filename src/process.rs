@@ -471,9 +471,9 @@ mod tests {
             .lock()
             .expect("subscriber test lock should not be poisoned");
         let base = tempdir().expect("temporary directory should be created");
-        let mut logs = LogSession::start(LogMode::Always, Some(base.path()))
+        let logs = LogSession::start(LogMode::Always, Some(base.path()))
             .expect("enabled logs should start");
-        let subscriber = test_subscriber(&mut logs);
+        let subscriber = test_subscriber(&logs);
         let _subscriber = tracing::subscriber::set_default(subscriber);
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()

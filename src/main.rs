@@ -87,11 +87,11 @@ fn report(result: Result<(), Error>, logs: Result<Option<PathBuf>, Error>) -> Ex
 #[tokio::main]
 async fn main() -> ExitCode {
     let cli = Cli::parse();
-    let mut logs = match LogSession::start(cli.logs, cli.logs_dir.as_deref()) {
+    let logs = match LogSession::start(cli.logs, cli.logs_dir.as_deref()) {
         Ok(logs) => logs,
         Err(error) => return report(Err(Error::Log(error)), Ok(None)),
     };
-    if let Some(writer) = logs.take_writer() {
+    if let Some(writer) = logs.writer() {
         let filter = EnvFilter::builder()
             .with_default_directive(LevelFilter::INFO.into())
             .from_env_lossy();
