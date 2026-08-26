@@ -14,13 +14,13 @@ nixos-rebuild switch --use-substitutes --flake .#web-server --target-host root@w
 
 Dance keeps the complete `nixos-rebuild` operations and adds:
 
-- An inventory list of hosts to deploy, mapping a flake output to a remote host.
-- Parallel execution of all selected deployments.
+- An **inventory** list of hosts to deploy, mapping a flake output to a remote host.
+- **Parallel execution** of all selected deployments.
 - Status queries: evaluate the desired system locally, then check if the remote needs to be updated.
-- Rollback including watchdog timers: if you lock yourself out of SSH, wait 6 minutes for it to revert automatically.
-- Deployment locks to prevent accidental parallel Dance deployments.
-- Verification of deployments: write a script to smoke-test a server, with automatic rollbacks on failure.
-- No local state! `dance` does not rely on any mutable state, just immutable inventory. If your `flake.lock` is version controlled, you can run it on any machine without having to ensure any sort of deployment state is checked in.
+- **Rollback** including watchdog timers: if you lock yourself out of SSH, wait 6 minutes for it to revert automatically.
+- **Deployment locks** to prevent accidental parallel Dance deployments.
+- **Verification** of deployments: write a script to smoke-test a server, with automatic rollbacks on failure.
+- **No local state**! `dance` does not rely on any mutable state, just immutable inventory. If your `flake.lock` is version controlled, you can run it on any machine without having to ensure any sort of deployment state is checked in.
 
 ## Writing an inventory file
 
