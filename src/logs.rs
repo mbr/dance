@@ -60,6 +60,18 @@ pub(crate) struct OutputLog {
 }
 
 impl OutputLog {
+    /// Creates one numbered command output log and returns its artifact name.
+    fn create(
+        directory: &Path,
+        command_id: usize,
+        stream: &str,
+    ) -> Result<(String, Self), LogError> {
+        let name = format!("{command_id:03}.{stream}");
+        let path = directory.join(&name);
+        let file = open_log(&path)?;
+        Ok((name, Self { path, file }))
+    }
+
     /// Writes output bytes to the diagnostic file.
     pub(crate) fn write(&mut self, bytes: &[u8]) -> Result<(), LogError> {
         self.file
@@ -82,10 +94,10 @@ pub(crate) struct CommandLog<'a> {
     finished: bool,
 }
 
-/// Separates command lifecycle logging from its independently consumed output files.
-pub(crate) struct CommandDiagnostics<'a> {
+/// Owns the lifecycle and output logs allocated for one subprocess.
+pub(crate) struct CommandLogs<'a> {
     /// Records command completion, failure, or interruption.
-    pub(crate) log: CommandLog<'a>,
+    pub(crate) lifecycle: CommandLog<'a>,
     /// Receives standard output when diagnostic logging is enabled.
     pub(crate) stdout: Option<OutputLog>,
     /// Receives standard error when diagnostic logging is enabled.
@@ -169,11 +181,11 @@ impl LogSession {
         label: &str,
         program: impl AsRef<OsStr>,
         arguments: &[OsString],
-    ) -> Result<CommandDiagnostics<'a>, LogError> {
+    ) -> Result<CommandLogs<'a>, LogError> {
         let started = Instant::now();
         let Some(directory) = &self.directory else {
-            return Ok(CommandDiagnostics {
-                log: CommandLog {
+            return Ok(CommandLogs {
+                lifecycle: CommandLog {
                     _session: self,
                     id: None,
                     span: Span::none(),
@@ -185,12 +197,8 @@ impl LogSession {
             });
         };
         let id = self.next_command_id.fetch_add(1, Ordering::Relaxed);
-        let stdout_name = format!("{id:03}.stdout");
-        let stderr_name = format!("{id:03}.stderr");
-        let stdout = directory.join(&stdout_name);
-        let stderr = directory.join(&stderr_name);
-        let stdout_log = open_log(&stdout)?;
-        let stderr_log = open_log(&stderr)?;
+        let (stdout_name, stdout) = OutputLog::create(directory, id, "stdout")?;
+        let (stderr_name, stderr) = OutputLog::create(directory, id, "stderr")?;
         let span = tracing::info_span!("command", id);
         tracing::info!(
             parent: &span,
@@ -202,22 +210,16 @@ impl LogSession {
             "command started"
         );
 
-        Ok(CommandDiagnostics {
-            log: CommandLog {
+        Ok(CommandLogs {
+            lifecycle: CommandLog {
                 _session: self,
                 id: Some(id),
                 span,
                 started,
                 finished: false,
             },
-            stdout: Some(OutputLog {
-                path: stdout,
-                file: stdout_log,
-            }),
-            stderr: Some(OutputLog {
-                path: stderr,
-                file: stderr_log,
-            }),
+            stdout: Some(stdout),
+            stderr: Some(stderr),
         })
     }
 
@@ -358,7 +360,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{
-        CommandDiagnostics, LogMode, LogSession, SUBSCRIBER_LOCK, state_directory, test_subscriber,
+        CommandLogs, LogMode, LogSession, SUBSCRIBER_LOCK, state_directory, test_subscriber,
     };
 
     /// Checks XDG state overrides and the home-directory fallback.
@@ -396,8 +398,8 @@ mod tests {
         let subscriber = test_subscriber(&mut logs);
         let directory = tracing::subscriber::with_default(subscriber, || {
             logs.record_start(Path::new("inventory.toml"));
-            let CommandDiagnostics {
-                log: command,
+            let CommandLogs {
+                lifecycle: command,
                 mut stdout,
                 mut stderr,
             } = logs
