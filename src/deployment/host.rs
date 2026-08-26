@@ -16,7 +16,7 @@ pub(super) struct LockedHost {
     /// Contains the reviewed host state.
     reviewed: ReviewedHost,
     /// Guards the host against overlapping deployment.
-    lock: DeploymentLock,
+    _lock: DeploymentLock,
 }
 
 /// Owns a locked host whose active system was revalidated.
@@ -24,7 +24,7 @@ pub(super) struct ValidatedHost {
     /// Contains the reviewed host state.
     reviewed: ReviewedHost,
     /// Guards the host throughout activation and recovery.
-    lock: DeploymentLock,
+    _lock: DeploymentLock,
 }
 
 /// Describes the result of one host deployment.
@@ -39,8 +39,6 @@ pub(super) enum Outcome {
     RecoveryRequired(Error),
     /// The host was activated but could not be cleaned.
     CleanupFailed(Error),
-    /// The host was activated but its deployment lock could not be released cleanly.
-    LockReleaseFailed(Error),
 }
 
 impl Outcome {
@@ -49,10 +47,7 @@ impl Outcome {
         match self {
             Self::Activated => status::finish(progress, host),
             Self::RecoveryRequired(_) => status::recovery_required(progress),
-            Self::Failed(_)
-            | Self::RolledBack(_)
-            | Self::CleanupFailed(_)
-            | Self::LockReleaseFailed(_) => {
+            Self::Failed(_) | Self::RolledBack(_) | Self::CleanupFailed(_) => {
                 status::fail(progress);
             }
         }
@@ -69,7 +64,10 @@ impl LockedHost {
         let lock = DeploymentLock::acquire(reviewed.id(), &reviewed.host.ssh_url())
             .await
             .map_err(Error::Lock)?;
-        Ok(Self { reviewed, lock })
+        Ok(Self {
+            reviewed,
+            _lock: lock,
+        })
     }
 
     /// Revalidates the active system while holding the deployment lock.
@@ -80,31 +78,19 @@ impl LockedHost {
     ) -> Result<ValidatedHost, Error> {
         let active =
             operations::deployed_store_path(&self.reviewed.host, processes, progress).await;
-        let active = match active {
-            Ok(active) => active,
-            Err(error) => {
-                self.abandon().await;
-                return Err(error);
-            }
-        };
+        let active = active?;
         if active != self.reviewed.deployed {
             let error = Error::DeploymentStateChanged {
                 host: self.reviewed.id().to_owned(),
                 reviewed: self.reviewed.deployed.clone(),
                 active,
             };
-            self.abandon().await;
             return Err(error);
         }
         Ok(ValidatedHost {
             reviewed: self.reviewed,
-            lock: self.lock,
+            _lock: self._lock,
         })
-    }
-
-    /// Releases a lock after fleet-level work is abandoned.
-    pub(super) async fn abandon(self) {
-        release_abandoned(&self.reviewed, self.lock).await;
     }
 }
 
@@ -116,40 +102,9 @@ impl ValidatedHost {
         processes: &ProcessContext<'_>,
         progress: &ProgressBar,
     ) -> Outcome {
-        let Self { reviewed, lock } = self;
-        let outcome = run_activation(&reviewed, options, processes, progress).await;
-        let outcome = match lock.release().await {
-            Ok(()) => outcome,
-            Err(error) if matches!(outcome, Outcome::Activated) => {
-                Outcome::LockReleaseFailed(Error::Lock(error))
-            }
-            Err(error) => {
-                tracing::warn!(
-                    host = reviewed.id(),
-                    error = %error,
-                    "failed to release deployment lock",
-                );
-                outcome
-            }
-        };
-        outcome.finish_progress(reviewed.id(), progress);
+        let outcome = run_activation(&self.reviewed, options, processes, progress).await;
+        outcome.finish_progress(self.reviewed.id(), progress);
         outcome
-    }
-
-    /// Releases a validated lock when another host prevents activation.
-    pub(super) async fn abandon(self) {
-        release_abandoned(&self.reviewed, self.lock).await;
-    }
-}
-
-/// Releases an abandoned lock without replacing the primary fleet error.
-async fn release_abandoned(reviewed: &ReviewedHost, lock: DeploymentLock) {
-    if let Err(error) = lock.release().await {
-        tracing::warn!(
-            host = reviewed.id(),
-            error = %error,
-            "failed to release abandoned deployment lock",
-        );
     }
 }
 

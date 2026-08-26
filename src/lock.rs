@@ -19,8 +19,6 @@ use crate::ssh;
 const ACQUIRED: &[u8] = b"dance-lock-acquired\n";
 /// Limits SSH connection and lock acquisition.
 const ACQUISITION_TIMEOUT: Duration = Duration::from_mins(1);
-/// Limits graceful lock release.
-const RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 /// Runs while holding the remote file lock.
 const REMOTE_COMMAND: &str = concat!(
     "exec /run/current-system/sw/bin/flock --exclusive --nonblock ",
@@ -79,46 +77,19 @@ pub(crate) enum LockError {
         #[source]
         source: io::Error,
     },
-    /// Indicates that a lock could not be released cleanly.
-    #[error("failed to release deployment lock on host `{host}`")]
-    Release {
-        /// Identifies the target host.
-        host: String,
-        /// Contains the process lifecycle error.
-        #[source]
-        source: io::Error,
-    },
-    /// Indicates that lock release exceeded its deadline.
-    #[error("timed out releasing deployment lock on host `{host}`")]
-    ReleaseTimedOut {
-        /// Identifies the target host.
-        host: String,
-    },
-    /// Indicates that the lock process failed during release.
-    #[error("deployment lock process for host `{host}` exited with {status}: {stderr}")]
-    ReleaseFailed {
-        /// Identifies the target host.
-        host: String,
-        /// Contains the SSH process status.
-        status: ExitStatus,
-        /// Contains concise process diagnostics.
-        stderr: String,
-    },
 }
 
 /// Holds an exclusive deployment lock on one host.
 ///
-/// Dropping the guard closes its input and drops the kill-on-drop SSH child. Normal workflows call
-/// [`Self::release`] to await shutdown and report failures.
+/// Dropping the guard closes its input and drops the kill-on-drop SSH child, releasing the remote
+/// file lock.
 pub(crate) struct DeploymentLock {
-    /// Owns the SSH lock process.
-    child: Child,
-    /// Keeps the remote lock holder's standard input open.
-    stdin: ChildStdin,
-    /// Collects SSH diagnostics without blocking the child.
-    stderr: JoinHandle<Result<Vec<u8>, io::Error>>,
-    /// Identifies the target host.
-    host: String,
+    /// Keeps the remote lock holder's standard input open until the guard is dropped.
+    _stdin: ChildStdin,
+    /// Owns the kill-on-drop SSH lock process.
+    _child: Child,
+    /// Drains SSH diagnostics so the lock process cannot block on standard error.
+    _stderr: JoinHandle<Result<Vec<u8>, io::Error>>,
 }
 
 impl DeploymentLock {
@@ -167,10 +138,9 @@ impl DeploymentLock {
 
         match acquisition {
             Ok(Ok(_)) if acknowledgement == ACQUIRED => Ok(Self {
-                child,
-                stdin,
-                stderr,
-                host: host.to_owned(),
+                _stdin: stdin,
+                _child: child,
+                _stderr: stderr,
             }),
             Ok(Ok(_)) => {
                 drop(stdin);
@@ -217,35 +187,6 @@ impl DeploymentLock {
             }
         }
     }
-
-    /// Releases the lock by closing SSH standard input.
-    pub(crate) async fn release(self) -> Result<(), LockError> {
-        let Self {
-            mut child,
-            stdin,
-            stderr,
-            host,
-        } = self;
-        drop(stdin);
-        let status = match tokio::time::timeout(RELEASE_TIMEOUT, child.wait()).await {
-            Ok(Ok(status)) => status,
-            Ok(Err(source)) => return Err(LockError::Release { host, source }),
-            Err(_) => {
-                terminate(&mut child).await;
-                return Err(LockError::ReleaseTimedOut { host });
-            }
-        };
-        let stderr = stderr_text(stderr, &host).await?;
-        if status.success() {
-            Ok(())
-        } else {
-            Err(LockError::ReleaseFailed {
-                host,
-                status,
-                stderr,
-            })
-        }
-    }
 }
 
 /// Converts collected process diagnostics to a concise string.
@@ -276,6 +217,8 @@ async fn terminate(child: &mut Child) {
 
 #[cfg(all(test, target_os = "linux"))]
 mod tests {
+    use std::time::Duration;
+
     use tempfile::tempdir;
     use tokio::process::Command;
 
@@ -296,9 +239,9 @@ mod tests {
         command
     }
 
-    /// Checks exclusive acquisition, conflict reporting, and release through EOF.
+    /// Checks exclusive acquisition, conflict reporting, and scope-based release.
     #[tokio::test]
-    async fn locks_are_exclusive_and_release_on_stdin_eof() {
+    async fn locks_are_exclusive_and_release_on_drop() {
         let directory = tempdir().expect("temporary directory should be created");
         let path = directory.path().join("deployment.lock");
         let first = DeploymentLock::spawn("test", command(&path))
@@ -307,12 +250,18 @@ mod tests {
         let conflict = DeploymentLock::spawn("test", command(&path)).await;
         assert!(matches!(conflict, Err(LockError::Unavailable { .. })));
 
-        first.release().await.expect("lock should be released");
-        DeploymentLock::spawn("test", command(&path))
-            .await
-            .expect("released lock should be acquirable")
-            .release()
-            .await
-            .expect("second lock should be released");
+        drop(first);
+        let second = tokio::time::timeout(Duration::from_secs(1), async {
+            loop {
+                match DeploymentLock::spawn("test", command(&path)).await {
+                    Ok(lock) => break lock,
+                    Err(LockError::Unavailable { .. }) => tokio::task::yield_now().await,
+                    Err(error) => panic!("released lock should be acquirable: {error}"),
+                }
+            }
+        })
+        .await
+        .expect("dropped lock should be released promptly");
+        drop(second);
     }
 }
