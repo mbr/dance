@@ -21,8 +21,6 @@ pub(crate) struct UpdateOutcome {
     failed: HashSet<PathBuf>,
     /// Retains the first update error for reporting.
     first_error: Option<Error>,
-    /// Contains changed locks awaiting successful deployment.
-    pending: PendingUpdates,
 }
 
 impl UpdateOutcome {
@@ -31,9 +29,9 @@ impl UpdateOutcome {
         self.failed.contains(flake)
     }
 
-    /// Separates the first update error from pending lock commits.
-    pub(crate) fn into_parts(self) -> (Option<Error>, PendingUpdates) {
-        (self.first_error, self.pending)
+    /// Returns the first update error for reporting.
+    pub(crate) fn into_error(self) -> Option<Error> {
+        self.first_error
     }
 }
 
@@ -69,13 +67,14 @@ async fn flake(
     (path, result)
 }
 
-/// Updates distinct flakes concurrently and collects their failures.
+/// Updates distinct flakes and optionally commits before configuration evaluation.
 pub(crate) async fn flakes(
     flakes: Vec<(PathBuf, Vec<ProgressBar>)>,
     commit: bool,
     processes: &ProcessContext<'_>,
-) -> UpdateOutcome {
+) -> Result<UpdateOutcome, Error> {
     let mut outcome = UpdateOutcome::default();
+    let mut pending = PendingUpdates::default();
     let updates = if commit {
         let prepared = join_all(flakes.into_iter().map(|(path, progresses)| async move {
             let progress = progresses
@@ -114,7 +113,7 @@ pub(crate) async fn flakes(
 
     for (path, result) in results {
         match result {
-            Ok(lock) => outcome.pending.push(lock),
+            Ok(lock) => pending.push(lock),
             Err(error) => {
                 outcome.failed.insert(path);
                 outcome.first_error.get_or_insert(error);
@@ -122,5 +121,12 @@ pub(crate) async fn flakes(
         }
     }
 
-    outcome
+    if commit {
+        if let Some(error) = outcome.first_error {
+            return Err(error);
+        }
+        pending.commit(processes).await?;
+    }
+
+    Ok(outcome)
 }

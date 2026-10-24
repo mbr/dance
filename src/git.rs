@@ -94,7 +94,7 @@ impl FlakeRepository {
     }
 }
 
-/// Describes one updated lock awaiting a successful deployment.
+/// Describes one updated lock awaiting a commit.
 pub(crate) struct PendingLock {
     /// Identifies the repository root.
     repository: PathBuf,
@@ -108,7 +108,7 @@ pub(crate) struct PendingLock {
     status: String,
 }
 
-/// Collects updated lock files awaiting successful deployment.
+/// Collects updated lock files for committing before evaluation.
 #[derive(Default)]
 pub(crate) struct PendingUpdates {
     /// Contains pending lock files in update order.

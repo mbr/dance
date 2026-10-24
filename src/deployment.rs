@@ -21,7 +21,6 @@ use self::{
 };
 use crate::{
     error::Error,
-    git::PendingUpdates,
     inventory::{Host, Inventory},
     process::ProcessContext,
     status::{self, ProgressDisplay},
@@ -34,7 +33,7 @@ use crate::{
 pub(crate) struct DeployOptions {
     /// Selects whether flake inputs are updated during review.
     pub(crate) update_flakes: bool,
-    /// Selects whether changed flake locks are committed after deployment.
+    /// Selects whether changed flake locks are committed before evaluation.
     pub(crate) commit_flakes: bool,
     /// Selects whether interactive approval has been bypassed.
     pub(crate) approved: bool,
@@ -59,8 +58,6 @@ struct ReviewResult {
     outdated: Vec<ReviewedHost>,
     /// Contains the first failure encountered while collecting information.
     first_error: Option<Error>,
-    /// Contains updated locks awaiting successful deployment.
-    pending_updates: PendingUpdates,
 }
 
 /// Aggregates deployment outcomes for terminal output and exit status.
@@ -165,7 +162,6 @@ pub(crate) async fn deploy(
     let ReviewResult {
         outdated,
         first_error,
-        pending_updates,
     } = collect(
         inventory,
         options.update_flakes,
@@ -175,10 +171,7 @@ pub(crate) async fn deploy(
     )
     .await?;
     if outdated.is_empty() {
-        return match first_error {
-            Some(error) => Err(error),
-            None => pending_updates.commit(processes).await,
-        };
+        return first_error.map_or(Ok(()), Err);
     }
 
     if !options.approved && !confirm()? {
@@ -189,8 +182,7 @@ pub(crate) async fn deploy(
     if let Some(error) = first_error {
         return Err(error);
     }
-    deployment?;
-    pending_updates.commit(processes).await
+    deployment
 }
 
 /// Collects and displays the active and desired state of selected hosts.
@@ -234,7 +226,7 @@ async fn collect(
     );
     let local = async {
         let updates = if update_flakes {
-            update::flakes(flakes, commit_flakes, processes).await
+            update::flakes(flakes, commit_flakes, processes).await?
         } else {
             UpdateOutcome::default()
         };
@@ -263,10 +255,11 @@ async fn collect(
             }
         };
         let (expected, validity) = tokio::join!(expected, validity);
-        (updates, expected, validity)
+        Ok::<_, Error>((updates, expected, validity))
     };
-    let (deployed, (updates, expected, validity)) = tokio::join!(deployed, local);
-    let (update_error, pending_updates) = updates.into_parts();
+    let (deployed, local) = tokio::join!(deployed, local);
+    let (updates, expected, validity) = local?;
+    let update_error = updates.into_error();
 
     let mut rows = Vec::with_capacity(hosts.len());
     let mut outdated = Vec::new();
@@ -332,7 +325,6 @@ async fn collect(
     Ok(ReviewResult {
         outdated,
         first_error,
-        pending_updates,
     })
 }
 

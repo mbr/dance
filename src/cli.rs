@@ -73,10 +73,10 @@ pub(crate) struct DeployArgs {
     /// Configures the hosts and inputs to compare.
     #[command(flatten)]
     pub(crate) workflow: WorkflowArgs,
-    /// Commits changed flake locks after a successful deployment.
+    /// Commits changed flake locks before evaluation and deployment.
     #[arg(short, long, requires = "update")]
     pub(crate) commit: bool,
-    /// Updates flakes and commits changed locks after successful deployment.
+    /// Updates flakes and commits changed locks before evaluation and deployment.
     #[arg(short = 'g', long, conflicts_with_all = ["update", "commit"])]
     pub(crate) git: bool,
     /// Deploys without requesting confirmation.
