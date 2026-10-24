@@ -3,6 +3,7 @@
 use std::{num::NonZeroU32, time::Duration};
 
 use indicatif::ProgressBar;
+use serde::Deserialize;
 
 use crate::{
     error::Error,
@@ -11,6 +12,35 @@ use crate::{
     ssh,
     store_path::StorePath,
 };
+
+/// Contains a system's identity and optional source provenance.
+#[derive(Deserialize)]
+pub(super) struct SystemInfo {
+    /// Identifies the system output used for deployment comparisons.
+    pub(super) path: StorePath,
+    /// Identifies the source revision supplied by the configuration author.
+    #[serde(rename = "configurationRevision")]
+    pub(super) revision: Option<String>,
+}
+
+/// Contains optional provenance reported by a generation's version command.
+#[derive(Deserialize)]
+struct SystemVersion {
+    /// Identifies the configuration source, independently of the Nixpkgs revision.
+    #[serde(rename = "configurationRevision")]
+    revision: Option<String>,
+}
+
+/// Reads a single generation's path and version metadata without following a switch.
+const DEPLOYED_SYSTEM: &str = r#"system=$(readlink -f /run/current-system) || exit
+version=$("$system/sw/bin/nixos-version" --json 2>/dev/null) || version='{}'
+printf '%s\n%s\n' "$system" "$version""#;
+
+/// Selects identity and provenance from the unmodified NixOS configuration.
+const EXPECTED_SYSTEM: &str = r#"system: {
+  path = system.config.system.build.toplevel.outPath;
+  configurationRevision = system.config.system.configurationRevision;
+}"#;
 
 /// Limits routine SSH operations.
 pub(super) const SSH_TIMEOUT: Duration = Duration::from_mins(1);
@@ -49,24 +79,57 @@ pub(super) async fn deployed_store_path(
     value.parse().map_err(Error::StorePath)
 }
 
-/// Evaluates a host's desired system without building it.
-pub(super) async fn expected_store_path(
+/// Reads the active system and any provenance supported by its version command.
+pub(super) async fn deployed_system(
     host: &Host,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
-) -> Result<StorePath, Error> {
+) -> Result<SystemInfo, Error> {
+    let output = ssh(
+        host,
+        format!("review-{}-remote", host.id()),
+        processes,
+        progress,
+    )
+    .argument(DEPLOYED_SYSTEM)
+    .timeout(SSH_TIMEOUT)
+    .output()
+    .await?;
+    let (path, version) = output.split_once('\n').unwrap_or((&output, ""));
+    let path = path.trim().parse().map_err(Error::StorePath)?;
+    let version: SystemVersion =
+        serde_json::from_str(version).map_err(|source| Error::ParseSystemInfo {
+            host: host.id().to_owned(),
+            source,
+        })?;
+    Ok(SystemInfo {
+        path,
+        revision: version.revision,
+    })
+}
+
+/// Evaluates a host's desired system and provenance without building it.
+pub(super) async fn expected_system(
+    host: &Host,
+    processes: &ProcessContext<'_>,
+    progress: &ProgressBar,
+) -> Result<SystemInfo, Error> {
     let output = Invocation::new(
         processes,
         format!("review-{}-local", host.id()),
         "nix",
         progress,
     )
-    .arguments(["eval", "--raw"])
+    .arguments(["eval", "--json"])
     .argument(host.nixos_output())
+    .argument("--apply")
+    .argument(EXPECTED_SYSTEM)
     .output()
     .await?;
-    let value = output.trim();
-    value.parse().map_err(Error::StorePath)
+    serde_json::from_str(&output).map_err(|source| Error::ParseSystemInfo {
+        host: host.id().to_owned(),
+        source,
+    })
 }
 
 /// Builds and transfers a host configuration without activating it.
@@ -167,4 +230,51 @@ pub(super) async fn collect_garbage(
     .arguments(["nix-store", "--gc"])
     .status()
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::process::Command;
+
+    use super::{DEPLOYED_SYSTEM, SystemInfo, SystemVersion};
+
+    /// Checks optional provenance does not weaken system-path validation.
+    #[test]
+    fn parses_system_identity_and_optional_provenance() {
+        let info: SystemInfo = serde_json::from_str(
+            r#"{"path":"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system",
+                "configurationRevision":null}"#,
+        )
+        .expect("system information should parse");
+        assert!(info.revision.is_none());
+        let version: SystemVersion = serde_json::from_str(
+            r#"{"configurationRevision":"release-1","nixpkgsRevision":"other"}"#,
+        )
+        .expect("version information should parse");
+        assert_eq!(version.revision.as_deref(), Some("release-1"));
+        let missing: SystemVersion = serde_json::from_str(r#"{"nixpkgsRevision":"other"}"#)
+            .expect("configuration revision should be optional");
+        assert!(missing.revision.is_none());
+        assert!(serde_json::from_str::<SystemInfo>(r#"{"path":"/tmp/not-a-system"}"#).is_err());
+        assert!(serde_json::from_str::<SystemVersion>(r#"{"configurationRevision":42}"#).is_err());
+    }
+
+    /// Checks older generations without a version command still report their path.
+    #[test]
+    fn missing_version_command_preserves_system_identity() {
+        let directory = tempfile::tempdir().expect("temporary generation should be created");
+        let output = Command::new("sh")
+            .args([
+                "-c",
+                &format!("readlink() {{ printf '%s\\n' \"$TEST_SYSTEM\"; }}\n{DEPLOYED_SYSTEM}"),
+            ])
+            .env("TEST_SYSTEM", directory.path())
+            .output()
+            .expect("generation query should run");
+        assert!(output.status.success());
+        assert_eq!(
+            String::from_utf8(output.stdout).expect("query output should be UTF-8"),
+            format!("{}\n{{}}\n", directory.path().display())
+        );
+    }
 }

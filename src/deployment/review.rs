@@ -7,7 +7,7 @@ use std::{
 
 use indicatif::ProgressBar;
 
-use super::operations;
+use super::operations::{self, SystemInfo};
 use crate::{
     error::Error,
     inventory::Host,
@@ -79,6 +79,9 @@ pub(super) struct HostRow {
     /// Displays the store-path transition when deployment is needed.
     #[tabled(rename = "CHANGE")]
     change: String,
+    /// Displays optional source provenance independently of system identity.
+    #[tabled(rename = "REVISION")]
+    revision: String,
 }
 
 impl HostRow {
@@ -90,12 +93,20 @@ impl HostRow {
             status: HostStatus::Failed,
             valid,
             change: "-".to_owned(),
+            revision: "-".to_owned(),
         }
     }
 
     /// Creates a row from the deployed and desired systems.
-    fn collected(host: &Host, deployed: &StorePath, expected: &StorePath, valid: Validity) -> Self {
-        let up_to_date = deployed == expected;
+    fn collected(
+        host: &Host,
+        deployed: &SystemInfo,
+        expected: &SystemInfo,
+        valid: Validity,
+    ) -> Self {
+        let up_to_date = deployed.path == expected.path;
+        let old_revision = deployed.revision.as_deref().unwrap_or("-");
+        let new_revision = expected.revision.as_deref().unwrap_or("-");
         Self {
             id: host.id().to_owned(),
             flake: host.display_flake(),
@@ -108,8 +119,28 @@ impl HostRow {
             change: if up_to_date {
                 "-".to_owned()
             } else {
-                format!("{} -> {}", deployed.short_hash(), expected.short_hash())
+                format!(
+                    "{} -> {}",
+                    deployed.path.short_hash(),
+                    expected.path.short_hash()
+                )
             },
+            revision: if deployed.revision == expected.revision {
+                old_revision.escape_debug().to_string()
+            } else {
+                format!(
+                    "{} -> {}",
+                    old_revision.escape_debug(),
+                    new_revision.escape_debug()
+                )
+            },
+        }
+    }
+
+    /// Reports available provenance when the interactive table is not displayed.
+    pub(super) fn report_revision(&self) {
+        if self.revision != "-" {
+            println!("{}: revision {}", self.id, self.revision);
         }
     }
 
@@ -165,11 +196,11 @@ pub(super) async fn deployed(
     host: &Host,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
-) -> Result<StorePath, Error> {
+) -> Result<SystemInfo, Error> {
     collect_step(
         progress,
         "remote",
-        operations::deployed_store_path(host, processes, progress),
+        operations::deployed_system(host, processes, progress),
     )
     .await
 }
@@ -179,11 +210,11 @@ pub(super) async fn expected(
     host: &Host,
     processes: &ProcessContext<'_>,
     progress: &ProgressBar,
-) -> Result<StorePath, Error> {
+) -> Result<SystemInfo, Error> {
     collect_step(
         progress,
         "local",
-        operations::expected_store_path(host, processes, progress),
+        operations::expected_system(host, processes, progress),
     )
     .await
 }
@@ -218,13 +249,13 @@ pub(super) fn skip_validity(progress: &ProgressBar) {
 /// Compares the deployed and expected systems for one host.
 pub(super) fn review(
     host: Host,
-    deployed: StorePath,
-    expected: &StorePath,
+    deployed: SystemInfo,
+    expected: &SystemInfo,
     valid: Validity,
 ) -> ReviewOutcome {
     let row = HostRow::collected(&host, &deployed, expected, valid);
 
-    if &deployed == expected {
+    if deployed.path == expected.path {
         return ReviewOutcome::UpToDate(row);
     }
 
@@ -232,8 +263,56 @@ pub(super) fn review(
         row,
         ReviewedHost {
             host,
-            deployed,
-            expected: expected.clone(),
+            deployed: deployed.path,
+            expected: expected.path.clone(),
         },
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use tabled::Table;
+
+    use super::{HostRow, Validity};
+    use crate::{deployment::operations::SystemInfo, inventory::Inventory};
+
+    /// Checks optional revisions and arbitrary labels remain safe table metadata.
+    #[test]
+    fn displays_optional_revision_transitions() {
+        let inventory: Inventory = toml::from_str(
+            "[hosts.test]\nssh_host = 'test'\nflake_path = '.'\nflake_name = 'test'\n",
+        )
+        .expect("inventory should parse");
+        let host = inventory.into_iter().next().expect("host should exist");
+        for (old, new, label) in [
+            (None, None, "-"),
+            (None, Some("candidate"), "- -> candidate"),
+            (Some("deployed"), None, "deployed -> -"),
+            (Some("release-1"), Some("release-1"), "release-1"),
+            (
+                Some("old-dirty"),
+                Some("new-dirty"),
+                "old-dirty -> new-dirty",
+            ),
+            (None, Some("bad\n\u{1b}[31m"), "- -> bad\\n\\u{1b}[31m"),
+        ] {
+            let path = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system"
+                .parse()
+                .expect("system path should parse");
+            let deployed = SystemInfo {
+                path,
+                revision: old.map(str::to_owned),
+            };
+            let expected = SystemInfo {
+                path: deployed.path.clone(),
+                revision: new.map(str::to_owned),
+            };
+            let row = HostRow::collected(&host, &deployed, &expected, Validity::Unchecked);
+            assert_eq!(row.revision, label);
+            assert!(!row.needs_activation());
+            let table = Table::new([row]).to_string();
+            assert!(table.contains("REVISION"));
+            assert!(table.contains(label));
+        }
+    }
 }

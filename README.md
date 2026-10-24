@@ -80,6 +80,18 @@ This queries every host and performs the following steps:
 
 These steps run for all servers in parallel.
 
+The `REVISION` column shows optional configuration provenance: the shared revision when unchanged, `old -> new` when it differs, and `-` for missing values. Noninteractive output reports available revisions on separate per-host lines.
+
+A flake can opt in by adding a NixOS module with `self` in scope:
+
+```nix
+{ system.configurationRevision = self.rev or self.dirtyRev or null; }
+```
+
+Dance reads this value from the desired configuration and the active generation's `nixos-version --json`. It neither sets nor overrides it, and ordinary deployments do not require Git. A missing revision or unavailable remote version command leaves provenance unspecified.
+
+Deployment decisions still compare system store paths, not revisions. Embedding `self.rev` changes the system path on every commit, including commits unrelated to that host. Dirty revisions are labels, not reproducible source identities.
+
 ## Deploying servers
 
 Using `deploy` instead of `status` performs the same active-versus-desired comparison without verifying the old system, then offers a confirmation prompt. If you answer `y` there (or pass `--yes`), `dance` will, for each outdated server:

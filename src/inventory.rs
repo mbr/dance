@@ -164,12 +164,9 @@ impl Host {
         self.flake_output(&self.flake_name)
     }
 
-    /// Returns the flake output used to evaluate the desired system.
+    /// Returns the flake output containing the desired NixOS configuration.
     pub(crate) fn nixos_output(&self) -> OsString {
-        self.flake_output(&format!(
-            "nixosConfigurations.{}.config.system.build.toplevel.outPath",
-            self.flake_name
-        ))
+        self.flake_output(&format!("nixosConfigurations.{}", self.flake_name))
     }
 
     /// Returns the verifier output for a deployment-machine system.

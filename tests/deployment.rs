@@ -44,14 +44,25 @@ case "$1" in
         test "$SCENARIO" != update-failure
         ;;
     eval)
-        test "$(git show HEAD:flake.lock)" = updated
-        test -z "$(git status --porcelain -- flake.nix flake.lock)"
+        case "$SCENARIO" in
+            revision-* | no-git) ;;
+            *)
+                test "$(git show HEAD:flake.lock)" = updated
+                test -z "$(git status --porcelain -- flake.nix flake.lock)"
+                ;;
+        esac
         test "$SCENARIO" != evaluation-failure
-        if test "$SCENARIO" = confirmation; then
-            printf '/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-system\n'
-        else
-            printf '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system\n'
-        fi
+        path=/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system
+        revision=null
+        case "$SCENARIO" in
+            confirmation | revision-change | revision-same)
+                path=/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-system ;;
+        esac
+        case "$SCENARIO" in
+            revision-change | revision-same-path) revision='"candidate"' ;;
+            revision-same) revision='"deployed"' ;;
+        esac
+        printf '{"path":"%s","configurationRevision":%s}\n' "$path" "$revision"
         ;;
     *) exit 1 ;;
 esac
@@ -59,7 +70,12 @@ esac
         );
         executable(
             &root.join("bin/ssh"),
-            "printf '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system\\n'\n",
+            r#"printf '/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system\n'
+case "$SCENARIO" in
+    revision-*) printf '{"configurationRevision":"deployed"}\n' ;;
+    *) printf '{"nixpkgsRevision":"not-the-configuration-revision"}\n' ;;
+esac
+"#,
         );
         executable(&root.join("bin/nixos-rebuild"), "exit 99\n");
         Self { directory }
@@ -128,6 +144,48 @@ fn commits_before_evaluation() {
             "flake\neval\n"
         );
     }
+}
+
+/// Checks revisions are reported without controlling deployment eligibility.
+#[test]
+fn reports_revisions_without_changing_path_comparisons() {
+    for scenario in ["revision-change", "revision-same", "revision-same-path"] {
+        let fixture = Fixture::new();
+        let output = fixture.deploy(scenario, &[]);
+        let unchanged = scenario == "revision-same-path";
+        assert_eq!(output.status.success(), unchanged, "{scenario}: {output:?}");
+        let stdout = String::from_utf8(output.stdout).expect("output should be UTF-8");
+        assert!(stdout.contains(if unchanged {
+            "1 up to date, 0 out of date"
+        } else {
+            "0 up to date, 1 out of date"
+        }));
+        assert!(stdout.contains(if scenario == "revision-same" {
+            "test: revision deployed\n"
+        } else {
+            "test: revision deployed -> candidate\n"
+        }));
+    }
+}
+
+/// Checks configurations without revision metadata do not require Git.
+#[test]
+fn deploys_without_git_or_revision_metadata() {
+    let fixture = Fixture::new();
+    let root = fixture.directory.path();
+    fs::remove_dir_all(root.join(".git")).expect("Git repository should be removed");
+    executable(
+        &root.join("bin/git"),
+        "echo unexpected-git-call >&2; exit 99\n",
+    );
+    let output = fixture.deploy("no-git", &["--yes"]);
+    assert!(output.status.success(), "{output:?}");
+    let stdout = String::from_utf8(output.stdout).expect("output should be UTF-8");
+    assert!(!stdout.contains("revision"));
+    assert_eq!(
+        fs::read_to_string(root.join("commands")).expect("command trace should exist"),
+        "eval\n"
+    );
 }
 
 /// Checks update failures stop review and later failures preserve committed locks.

@@ -6,6 +6,7 @@ use std::{
     str::FromStr,
 };
 
+use serde::{Deserialize, Deserializer, de::Error as DeserializeError};
 use thiserror::Error;
 
 /// Locates the Nix store used by managed NixOS systems.
@@ -60,6 +61,16 @@ impl FromStr for StorePath {
 
         let hash = hash.to_owned();
         Ok(Self { path, hash })
+    }
+}
+
+impl<'de> Deserialize<'de> for StorePath {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(D::Error::custom)
     }
 }
 

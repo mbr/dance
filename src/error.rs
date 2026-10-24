@@ -136,6 +136,15 @@ pub(crate) enum Error {
         #[source]
         source: serde_json::Error,
     },
+    /// Indicates that system identity or revision metadata was malformed.
+    #[error("failed to parse system information for host `{host}`")]
+    ParseSystemInfo {
+        /// Identifies the inventory host.
+        host: String,
+        /// Contains the JSON decoding error.
+        #[source]
+        source: serde_json::Error,
+    },
     /// Indicates that a Nix store path was malformed.
     #[error(transparent)]
     StorePath(StorePathError),

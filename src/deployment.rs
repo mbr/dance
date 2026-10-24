@@ -320,6 +320,9 @@ async fn collect(
             print!(", {validation_failed} validation failed");
         }
         println!();
+        for row in rows {
+            row.report_revision();
+        }
     }
 
     Ok(ReviewResult {
