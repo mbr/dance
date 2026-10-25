@@ -31,12 +31,6 @@ struct SystemVersion {
     revision: Option<String>,
 }
 
-/// Selects identity and provenance from the unmodified NixOS configuration.
-const EXPECTED_SYSTEM: &str = r#"system: {
-  path = system.config.system.build.toplevel.outPath;
-  configurationRevision = system.config.system.configurationRevision;
-}"#;
-
 /// Limits routine SSH operations.
 pub(super) const SSH_TIMEOUT: Duration = Duration::from_mins(1);
 /// Bounds rebuild actions performed while the rollback watchdog is armed.
@@ -125,7 +119,12 @@ pub(super) async fn expected_system(
     .arguments(["eval", "--json"])
     .argument(host.nixos_output())
     .argument("--apply")
-    .argument(EXPECTED_SYSTEM)
+    .argument(
+        r#"system: {
+  path = system.config.system.build.toplevel.outPath;
+  configurationRevision = system.config.system.configurationRevision;
+}"#,
+    )
     .output()
     .await?;
     serde_json::from_str(&output).map_err(|source| Error::ParseSystemInfo {
