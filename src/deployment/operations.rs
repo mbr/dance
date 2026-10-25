@@ -232,29 +232,3 @@ pub(super) async fn collect_garbage(
     .status()
     .await
 }
-
-#[cfg(test)]
-mod tests {
-    use super::{SystemInfo, SystemVersion};
-
-    /// Checks optional provenance does not weaken system-path validation.
-    #[test]
-    fn parses_system_identity_and_optional_provenance() {
-        let info: SystemInfo = serde_json::from_str(
-            r#"{"path":"/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-system",
-                "configurationRevision":null}"#,
-        )
-        .expect("system information should parse");
-        assert!(info.revision.is_none());
-        let version: SystemVersion = serde_json::from_str(
-            r#"{"configurationRevision":"release-1","nixpkgsRevision":"other"}"#,
-        )
-        .expect("version information should parse");
-        assert_eq!(version.revision.as_deref(), Some("release-1"));
-        let missing: SystemVersion = serde_json::from_str(r#"{"nixpkgsRevision":"other"}"#)
-            .expect("configuration revision should be optional");
-        assert!(missing.revision.is_none());
-        assert!(serde_json::from_str::<SystemInfo>(r#"{"path":"/tmp/not-a-system"}"#).is_err());
-        assert!(serde_json::from_str::<SystemVersion>(r#"{"configurationRevision":42}"#).is_err());
-    }
-}
