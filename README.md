@@ -80,6 +80,10 @@ This queries every host and performs the following steps:
 
 These steps run for all servers in parallel.
 
+### Revisions
+
+NixOS configuration revisions let you record which source a running system was built from, such as a specific Git commit.
+
 The `REVISION` column shows optional configuration provenance: the shared revision when unchanged, `old -> new` when it differs, and `-` for missing values. Noninteractive output reports available revisions on separate per-host lines.
 
 A flake can opt in by adding a NixOS module with `self` in scope:
@@ -90,7 +94,9 @@ A flake can opt in by adding a NixOS module with `self` in scope:
 
 Dance reads this value from the desired configuration and the active generation's `nixos-version --json`. It neither sets nor overrides it, and ordinary deployments do not require Git. A missing revision or unavailable remote version command leaves provenance unspecified.
 
-Deployment decisions still compare system store paths, not revisions. Embedding `self.rev` changes the system path on every commit, including commits unrelated to that host. Dirty revisions are labels, not reproducible source identities.
+Dance decides whether to deploy by comparing system store paths. The revision is part of that system: setting it to `self.rev` means every new commit changes the store path, even if the commit only changes documentation or another host's configuration. Dance will therefore consider the system outdated.
+
+A dirty revision indicates uncommitted changes. The Git commit alone cannot reproduce that configuration.
 
 ## Deploying servers
 
