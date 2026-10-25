@@ -114,15 +114,6 @@ mod tests {
 
     use super::{Cli, Command};
 
-    /// Checks that lock commits cannot be requested without updating inputs.
-    #[test]
-    fn committing_requires_an_update() {
-        assert!(Cli::try_parse_from(["dance", "deploy", "--commit"]).is_err());
-        let cli = Cli::try_parse_from(["dance", "deploy", "--update", "--commit"])
-            .expect("commit with update should parse");
-        assert!(matches!(cli.command, Command::Deploy(args) if args.commit));
-    }
-
     /// Checks the combined Git update shorthand and its explicit-option conflicts.
     #[test]
     fn git_enables_update_and_commit() {

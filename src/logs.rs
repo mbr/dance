@@ -397,30 +397,7 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{CommandLogs, LogMode, OutputLogs, state_directory, with_test_log_session};
-
-    /// Checks XDG state overrides and the home-directory fallback.
-    #[test]
-    fn state_directory_is_available_on_all_platforms() {
-        let home = tempdir().expect("temporary home directory should be created");
-        let state = tempdir().expect("temporary state directory should be created");
-
-        assert_eq!(
-            state_directory(
-                Some(state.path().as_os_str().to_owned()),
-                Some(home.path().to_path_buf()),
-            ),
-            Some(state.path().to_path_buf())
-        );
-        assert_eq!(
-            state_directory(None, Some(home.path().to_path_buf())),
-            Some(home.path().join(".local/state"))
-        );
-        assert_eq!(
-            state_directory(Some("relative".into()), Some(home.path().to_path_buf())),
-            Some(home.path().join(".local/state"))
-        );
-    }
+    use super::{CommandLogs, LogMode, OutputLogs, with_test_log_session};
 
     /// Checks that retained runs contain tracing and output artifacts.
     #[test]

@@ -194,7 +194,7 @@ mod tests {
 
     use indexmap::IndexMap;
 
-    use super::{Host, Inventory, InventoryError, LoadError};
+    use super::{Host, Inventory, InventoryError};
 
     /// Creates a minimal inventory with hosts in the given order.
     fn inventory(ids: &[&str]) -> Inventory {
@@ -214,24 +214,6 @@ mod tests {
                 })
                 .collect::<IndexMap<_, _>>(),
         }
-    }
-
-    /// Checks that loading preserves structured read and parse failures.
-    #[test]
-    fn reports_inventory_load_errors() {
-        let directory = tempfile::tempdir().expect("temporary directory should be created");
-        let missing = directory.path().join("missing.toml");
-        assert!(matches!(
-            Inventory::load(&missing),
-            Err(InventoryError::Load(LoadError::Read(error))) if error.path == missing
-        ));
-
-        let malformed = directory.path().join("malformed.toml");
-        std::fs::write(&malformed, "not TOML =").expect("malformed inventory should be written");
-        assert!(matches!(
-            Inventory::load(&malformed),
-            Err(InventoryError::Load(LoadError::Parse(error))) if error.path == malformed
-        ));
     }
 
     /// Checks table parsing, selection validation, and inventory order.

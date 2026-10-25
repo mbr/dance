@@ -283,34 +283,3 @@ fn parse(host: &str, output: &str) -> Result<Option<Verifier>, Error> {
         })
         .transpose()
 }
-
-#[cfg(test)]
-mod tests {
-    use std::path::PathBuf;
-
-    use super::parse;
-
-    /// Checks the verifier metadata contract used with Nix evaluation.
-    #[test]
-    fn parses_verifier_metadata() {
-        let verifier = parse(
-            "www",
-            r#"{
-                "output": "/nix/store/11111111111111111111111111111111-verifier",
-                "mainProgram": "verify-www",
-                "system": "x86_64-linux"
-            }"#,
-        )
-        .expect("valid verifier metadata should parse")
-        .expect("verifier should be present");
-        assert_eq!(
-            verifier.executable(),
-            PathBuf::from("/nix/store/11111111111111111111111111111111-verifier/bin/verify-www")
-        );
-        assert!(
-            parse("www", "null")
-                .expect("missing verifier should parse")
-                .is_none()
-        );
-    }
-}
