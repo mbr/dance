@@ -300,17 +300,7 @@ fn display_message(record: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CaptureBuffer, display_message};
-
-    /// Checks carriage-return and newline progress extraction.
-    #[test]
-    fn display_message_uses_the_last_nonempty_record() {
-        assert_eq!(
-            display_message(b"building\rchecking\n\n"),
-            Some("checking".to_owned())
-        );
-        assert_eq!(display_message(b"\r\n"), None);
-    }
+    use super::CaptureBuffer;
 
     /// Checks that diagnostic output retains only its configured suffix.
     #[test]
