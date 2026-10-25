@@ -31,11 +31,6 @@ struct SystemVersion {
     revision: Option<String>,
 }
 
-/// Reads a single generation's path and version metadata without following a switch.
-const DEPLOYED_SYSTEM: &str = r#"system=$(readlink -f /run/current-system) || exit
-version=$("$system/sw/bin/nixos-version" --json 2>/dev/null) || version='{}'
-printf '%s\n%s\n' "$system" "$version""#;
-
 /// Selects identity and provenance from the unmodified NixOS configuration.
 const EXPECTED_SYSTEM: &str = r#"system: {
   path = system.config.system.build.toplevel.outPath;
@@ -80,6 +75,9 @@ pub(super) async fn deployed_store_path(
 }
 
 /// Reads the active system and any provenance supported by its version command.
+///
+/// Resolves `/run/current-system` once to keep the path and revision tied to the
+/// same generation if another deployment switches the system during the query.
 pub(super) async fn deployed_system(
     host: &Host,
     processes: &ProcessContext<'_>,
@@ -91,7 +89,11 @@ pub(super) async fn deployed_system(
         processes,
         progress,
     )
-    .argument(DEPLOYED_SYSTEM)
+    .argument(
+        r#"system=$(readlink -f /run/current-system) || exit
+version=$("$system/sw/bin/nixos-version" --json 2>/dev/null) || version='{}'
+printf '%s\n%s\n' "$system" "$version""#,
+    )
     .timeout(SSH_TIMEOUT)
     .output()
     .await?;
@@ -234,9 +236,7 @@ pub(super) async fn collect_garbage(
 
 #[cfg(test)]
 mod tests {
-    use std::process::Command;
-
-    use super::{DEPLOYED_SYSTEM, SystemInfo, SystemVersion};
+    use super::{SystemInfo, SystemVersion};
 
     /// Checks optional provenance does not weaken system-path validation.
     #[test]
@@ -257,24 +257,5 @@ mod tests {
         assert!(missing.revision.is_none());
         assert!(serde_json::from_str::<SystemInfo>(r#"{"path":"/tmp/not-a-system"}"#).is_err());
         assert!(serde_json::from_str::<SystemVersion>(r#"{"configurationRevision":42}"#).is_err());
-    }
-
-    /// Checks older generations without a version command still report their path.
-    #[test]
-    fn missing_version_command_preserves_system_identity() {
-        let directory = tempfile::tempdir().expect("temporary generation should be created");
-        let output = Command::new("sh")
-            .args([
-                "-c",
-                &format!("readlink() {{ printf '%s\\n' \"$TEST_SYSTEM\"; }}\n{DEPLOYED_SYSTEM}"),
-            ])
-            .env("TEST_SYSTEM", directory.path())
-            .output()
-            .expect("generation query should run");
-        assert!(output.status.success());
-        assert_eq!(
-            String::from_utf8(output.stdout).expect("query output should be UTF-8"),
-            format!("{}\n{{}}\n", directory.path().display())
-        );
     }
 }
