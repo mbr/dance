@@ -122,8 +122,6 @@ $ dance deploy --update --commit
 $ dance deploy --git
 ```
 
-Automatic commits include only updated lock files, grouped by repository, and are not pushed. An update or commit failure stops the deployment before configuration evaluation. Commits remain in place if you decline deployment or if evaluation, activation, or verification fails. Other working-tree changes are not committed; exact Git provenance requires all configuration inputs to be clean.
-
 ## Verification
 
 A flake can optionally provide a runnable verifier with the same key as its NixOS configuration:
